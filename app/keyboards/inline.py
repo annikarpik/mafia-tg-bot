@@ -45,11 +45,11 @@ def confirm_role_change_keyboard(game_id: int, new_role: str) -> InlineKeyboardM
     return kb.as_markup()
 
 
-def player_until_keyboard(game_id: int, options: list[str]) -> InlineKeyboardMarkup:
+def player_until_keyboard(game_id: int, options: list[str], role: str = "player") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for option in options:
         token = option.replace(":", "")
-        kb.button(text=f"🕒 До {option}", callback_data=f"player_until:{game_id}:{token}")
+        kb.button(text=f"🕒 До {option}", callback_data=f"role_until:{game_id}:{role}:{token}")
     kb.button(text="↩️ Назад", callback_data=f"role_back:{game_id}")
     if options:
         kb.adjust(2, 2, 2, 1)

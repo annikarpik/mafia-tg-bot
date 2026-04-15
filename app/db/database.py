@@ -538,28 +538,24 @@ class Database:
     ) -> tuple[bool, str]:
         if role not in ROLE_LIMITS:
             return False, "Неизвестная роль."
-        if role != "player":
-            available_until = None
 
         existing = self._user_registration(game_id, user_id)
         if existing and existing["role"] == role:
-            if role == "player":
-                previous_until = existing.get("available_until")
-                if previous_until == available_until:
-                    return False, "Вы уже записаны на эту игру с выбранным временем."
-                now = datetime.utcnow().isoformat()
-                self.conn.execute(
-                    """
-                    UPDATE registrations
-                    SET available_until = %s, created_at = %s
-                    WHERE id = %s
-                    """,
-                    (available_until, now, existing["id"]),
-                )
-                if available_until:
-                    return True, f"Обновили время: вы можете играть до {available_until}."
-                return True, "Обновили запись: вы можете играть без ограничения по времени."
-            return False, "Вы уже записаны на эту игру с выбранной ролью."
+            previous_until = existing.get("available_until")
+            if previous_until == available_until:
+                return False, "Вы уже записаны на эту игру с выбранным временем."
+            now = datetime.utcnow().isoformat()
+            self.conn.execute(
+                """
+                UPDATE registrations
+                SET available_until = %s, created_at = %s
+                WHERE id = %s
+                """,
+                (available_until, now, existing["id"]),
+            )
+            if available_until:
+                return True, f"Обновили время: вы можете быть до {available_until}."
+            return True, "Обновили запись: вы без ограничения по времени."
 
         if self._role_count(game_id, role) >= ROLE_LIMITS[role]:
             return False, f"Роль «{ROLE_LABELS[role]}» уже полностью занята."
@@ -583,8 +579,7 @@ class Database:
                 """,
                 (game_id, user_id, role, available_until, now),
             )
-        if role == "player":
-            if available_until:
-                return True, f"Вы успешно записались на игру в роли: Игрок (до {available_until})."
-            return True, "Вы успешно записались на игру в роли: Игрок (без ограничения по времени)."
-        return True, f"Вы успешно записались на игру в роли: {ROLE_LABELS[role]}."
+        role_label = ROLE_LABELS[role]
+        if available_until:
+            return True, f"Вы успешно записались на игру в роли: {role_label} (до {available_until})."
+        return True, f"Вы успешно записались на игру в роли: {role_label} (без ограничения по времени)."
