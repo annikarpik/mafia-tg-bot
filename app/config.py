@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
@@ -8,19 +8,17 @@ from dotenv import load_dotenv
 class Config:
     bot_token: str
     admin_password: str
-    superadmin_ids: set[int]
+    superadmin_ids: frozenset[int]
     db_path: str
 
 
-def _parse_admin_ids(raw: str) -> set[int]:
+def _parse_admin_ids(raw: str) -> frozenset[int]:
     result: set[int] = set()
     for chunk in raw.split(","):
         value = chunk.strip()
-        if not value:
-            continue
         if value.lstrip("-").isdigit():
             result.add(int(value))
-    return result
+    return frozenset(result)
 
 
 def load_config() -> Config:
