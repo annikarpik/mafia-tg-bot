@@ -86,8 +86,13 @@ async def nickname_handler(
     )
     ensure_superadmin(tg_id, db, config)
     ensure_admin_by_phone(tg_id=tg_id, phone=phone, db=db, config=config)
+    if message.from_user.username and db.consume_pending_admin_username(message.from_user.username):
+        db.add_admin(tg_id)
     await state.clear()
+    is_admin = db.is_admin(tg_id)
     await message.answer(
         f"Регистрация завершена! 🎉 Добро пожаловать, {salutation} {nickname}.",
-        reply_markup=main_keyboard(is_admin=db.is_admin(tg_id)),
+        reply_markup=main_keyboard(is_admin=is_admin),
     )
+    if is_admin:
+        await message.answer("🛠️ Вы переведены в статус администратора.")

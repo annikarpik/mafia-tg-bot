@@ -1,28 +1,103 @@
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
+from datetime import datetime
 
 from app.config import Config
 from app.db.database import Database, ROLE_LABELS
-from app.keyboards.inline import games_keyboard, roles_keyboard
+from app.keyboards.inline import (
+    confirm_role_change_keyboard,
+    games_keyboard,
+    player_until_keyboard,
+    roles_keyboard,
+)
 from app.utils import ensure_superadmin
 
 router = Router(name="schedule")
 
 
+def _can_cancel_for_user(db: Database, tg_id: int, game_id: int) -> bool:
+    user = db.get_user_by_tg(tg_id)
+    if not user:
+        return False
+    user_id = int(user["id"])
+    return db.user_registration(game_id, user_id) is not None or db.is_reserved(game_id, user_id)
+
+
 def _participants_block(db: Database, game_id: int) -> str:
-    role_order = ("host", "judge", "player")
-    grouped: dict[str, list[str]] = {key: [] for key in role_order}
+    grouped: dict[str, list[dict]] = {"host": [], "judge": [], "player": []}
     for row in db.list_game_registrations(game_id):
-        grouped.setdefault(row["role"], []).append(row["nickname"])
+        grouped.setdefault(row["role"], []).append(row)
 
     lines: list[str] = ["Уже записались:"]
-    for role in role_order:
-        label = ROLE_LABELS[role]
-        people = grouped.get(role, [])
-        lines.append(
-            f"• {label}: {', '.join(people) if people else 'пока никого'}"
-        )
+    hosts = grouped.get("host", [])
+    judges = grouped.get("judge", [])
+    players = grouped.get("player", [])
+    reserves = db.list_game_reserves(game_id)
+
+    lines.append(f"• Ведущий: {hosts[0]['nickname'] if hosts else 'пока никого'}")
+    lines.append(
+        f"• Судьи: {', '.join(row['nickname'] for row in judges) if judges else 'пока никого'}"
+    )
+    lines.append("• Игроки:")
+    if players:
+        for idx, row in enumerate(players, start=1):
+            until_suffix = f" (до {row['available_until']})" if row.get("available_until") else ""
+            lines.append(f"  {idx}. {row['nickname']}{until_suffix}")
+    else:
+        lines.append("  пока никого")
+    lines.append("• Наблюдатель/Запас:")
+    if reserves:
+        for idx, row in enumerate(reserves, start=1):
+            lines.append(f"  {idx}. {row['nickname']}")
+    else:
+        lines.append("  пока никого")
     return "\n".join(lines)
+
+
+def _game_card_text(db: Database, game: dict, game_id: int, prompt: str = "Выберите роль:") -> str:
+    return (
+        f"Игра #{game['id']} 🎭\n"
+        f"Дата и время: {game['starts_at']}\n"
+        f"Место: {game['location']}\n\n"
+        f"{_participants_block(db, game_id)}\n\n"
+        f"{prompt}"
+    )
+
+
+async def _refresh_game_card(callback: CallbackQuery, db: Database, game_id: int) -> None:
+    game = db.get_game_with_counts(game_id)
+    if not game:
+        await callback.answer("Игра не найдена.", show_alert=True)
+        return
+    can_cancel = _can_cancel_for_user(db=db, tg_id=callback.from_user.id, game_id=game_id)
+    await callback.message.edit_text(
+        _game_card_text(db, game, game_id),
+        reply_markup=roles_keyboard(game_id, game, can_cancel=can_cancel),
+    )
+
+
+def _player_until_options(starts_at: str) -> list[str]:
+    try:
+        start_dt = datetime.strptime(starts_at, "%d.%m.%Y %H:%M")
+    except ValueError:
+        return []
+    start_hour = start_dt.hour
+    return [f"{hour:02d}:00" for hour in range(start_hour + 1, 23)]
+
+
+async def _ask_player_until(callback: CallbackQuery, db: Database, game_id: int) -> None:
+    game = db.get_game_with_counts(game_id)
+    if not game:
+        await callback.answer("Игра не найдена.", show_alert=True)
+        return
+    options = _player_until_options(game["starts_at"])
+    prompt = "До какого времени вы можете играть?"
+    if not options:
+        prompt = "Для этой игры нет доступных слотов времени до 22:00."
+    await callback.message.edit_text(
+        _game_card_text(db, game, game_id, prompt=prompt),
+        reply_markup=player_until_keyboard(game_id, options),
+    )
 
 
 @router.message(F.text == "Расписание игр")
@@ -60,13 +135,10 @@ async def game_pick_handler(callback: CallbackQuery, db: Database) -> None:
         await callback.answer("Игра не найдена.", show_alert=True)
         return
 
+    can_cancel = _can_cancel_for_user(db=db, tg_id=tg_id, game_id=game_id)
     await callback.message.answer(
-        f"Игра #{game['id']} 🎭\n"
-        f"Дата и время: {game['starts_at']}\n"
-        f"Место: {game['location']}\n\n"
-        f"{_participants_block(db, game_id)}\n\n"
-        "Выберите роль:",
-        reply_markup=roles_keyboard(game_id, game),
+        _game_card_text(db, game, game_id),
+        reply_markup=roles_keyboard(game_id, game, can_cancel=can_cancel),
     )
     await callback.answer()
 
@@ -96,12 +168,180 @@ async def role_pick_handler(callback: CallbackQuery, db: Database) -> None:
         await callback.answer("Вы не зарегистрированы.", show_alert=True)
         return
 
-    _, text = db.register_user(game_id=game_id, user_id=int(user["id"]), role=role)
-    await callback.answer()
-    await callback.message.answer(f"{text} ✅")
+    current = db.user_registration(game_id=game_id, user_id=int(user["id"]))
+    if role == "player":
+        if current and current["role"] != role:
+            game = db.get_game_with_counts(game_id)
+            if not game:
+                await callback.answer("Игра не найдена.", show_alert=True)
+                return
+            current_role = ROLE_LABELS[current["role"]]
+            await callback.message.edit_text(
+                _game_card_text(
+                    db,
+                    game,
+                    game_id,
+                    prompt=(
+                        f"Вы точно хотите поменять роль с {current_role.lower()} "
+                        "на игрока?"
+                    ),
+                ),
+                reply_markup=confirm_role_change_keyboard(game_id=game_id, new_role=role),
+            )
+            await callback.answer()
+            return
+        await _ask_player_until(callback, db, game_id)
+        await callback.answer()
+        return
 
-    refreshed = db.get_game_with_counts(game_id)
-    if refreshed:
-        await callback.message.edit_reply_markup(
-            reply_markup=roles_keyboard(game_id, refreshed)
+    if current and current["role"] != role:
+        game = db.get_game_with_counts(game_id)
+        if not game:
+            await callback.answer("Игра не найдена.", show_alert=True)
+            return
+        current_role = ROLE_LABELS[current["role"]]
+        next_role = ROLE_LABELS[role]
+        await callback.message.edit_text(
+            _game_card_text(
+                db,
+                game,
+                game_id,
+                prompt=(
+                    f"Вы точно хотите поменять роль с {current_role.lower()} "
+                    f"на {next_role.lower()}?"
+                ),
+            ),
+            reply_markup=confirm_role_change_keyboard(game_id=game_id, new_role=role),
         )
+        await callback.answer()
+        return
+
+    _, text = db.register_user(game_id=game_id, user_id=int(user["id"]), role=role)
+    await _refresh_game_card(callback, db, game_id)
+    await callback.answer(f"{text} ✅")
+
+
+@router.callback_query(F.data.startswith("role_confirm:"))
+async def role_confirm_handler(callback: CallbackQuery, db: Database) -> None:
+    tg_id = callback.from_user.id
+    if not db.user_exists(tg_id):
+        await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
+        return
+
+    _, game_id_raw, role = callback.data.split(":")
+    game_id = int(game_id_raw)
+    user = db.get_user_by_tg(tg_id)
+    if not user:
+        await callback.answer("Вы не зарегистрированы.", show_alert=True)
+        return
+
+    if role == "player":
+        await _ask_player_until(callback, db, game_id)
+        await callback.answer()
+        return
+
+    _, text = db.register_user(game_id=game_id, user_id=int(user["id"]), role=role)
+    await _refresh_game_card(callback, db, game_id)
+    await callback.answer(f"{text} ✅")
+
+
+@router.callback_query(F.data.startswith("role_back:"))
+async def role_back_handler(callback: CallbackQuery, db: Database) -> None:
+    _, game_id_raw = callback.data.split(":")
+    game_id = int(game_id_raw)
+    await _refresh_game_card(callback, db, game_id)
+    await callback.answer("Оставили прежнюю роль")
+
+
+@router.callback_query(F.data.startswith("player_until:"))
+async def player_until_handler(callback: CallbackQuery, db: Database) -> None:
+    tg_id = callback.from_user.id
+    if not db.user_exists(tg_id):
+        await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
+        return
+
+    _, game_id_raw, until_token = callback.data.split(":")
+    game_id = int(game_id_raw)
+    game = db.get_game(game_id)
+    if not game:
+        await callback.answer("Игра не найдена.", show_alert=True)
+        return
+
+    options = _player_until_options(game["starts_at"])
+    available_until = f"{until_token[:2]}:{until_token[2:]}" if len(until_token) == 4 else None
+    if available_until not in options:
+        await callback.answer("Это время недоступно для выбранной игры.", show_alert=True)
+        return
+
+    user = db.get_user_by_tg(tg_id)
+    if not user:
+        await callback.answer("Вы не зарегистрированы.", show_alert=True)
+        return
+
+    _, text = db.register_user(
+        game_id=game_id,
+        user_id=int(user["id"]),
+        role="player",
+        available_until=available_until,
+    )
+    await _refresh_game_card(callback, db, game_id)
+    await callback.answer(f"{text} ✅")
+
+
+@router.callback_query(F.data.startswith("unregister:"))
+async def unregister_handler(callback: CallbackQuery, db: Database) -> None:
+    tg_id = callback.from_user.id
+    if not db.user_exists(tg_id):
+        await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
+        return
+
+    _, game_id_raw = callback.data.split(":")
+    game_id = int(game_id_raw)
+    user = db.get_user_by_tg(tg_id)
+    if not user:
+        await callback.answer("Вы не зарегистрированы.", show_alert=True)
+        return
+
+    user_id = int(user["id"])
+    current = db.user_registration(game_id=game_id, user_id=user_id)
+    promoted: dict | None = None
+    if current:
+        removed = db.unregister_user(game_id=game_id, user_id=user_id)
+        if removed and current["role"] == "player":
+            promoted = db.promote_next_reserve_to_player(game_id=game_id)
+    else:
+        removed = db.remove_from_reserve(game_id=game_id, user_id=user_id)
+
+    await _refresh_game_card(callback, db, game_id)
+    if removed:
+        await callback.answer("Регистрация на игру отменена ❌")
+        if promoted:
+            try:
+                await callback.bot.send_message(
+                    promoted["tg_id"],
+                    "🎉 Кто-то из игроков отменил свою регистрацию,\n"
+                    "теперь вы участвуете в игре как Игрок!",
+                )
+            except Exception:
+                pass
+    else:
+        await callback.answer("Вы не были записаны на эту игру")
+
+
+@router.callback_query(F.data.startswith("reserve:"))
+async def reserve_handler(callback: CallbackQuery, db: Database) -> None:
+    tg_id = callback.from_user.id
+    if not db.user_exists(tg_id):
+        await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
+        return
+
+    _, game_id_raw = callback.data.split(":")
+    game_id = int(game_id_raw)
+    user = db.get_user_by_tg(tg_id)
+    if not user:
+        await callback.answer("Вы не зарегистрированы.", show_alert=True)
+        return
+
+    _, text = db.add_to_reserve(game_id=game_id, user_id=int(user["id"]))
+    await _refresh_game_card(callback, db, game_id)
+    await callback.answer(text)

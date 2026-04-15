@@ -1,4 +1,4 @@
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
@@ -35,6 +35,18 @@ def _resolve_admin_target(raw_value: str, db: Database) -> tuple[int | None, str
     return None, "Неверный формат. Введите Telegram ID, номер телефона или @username."
 
 
+async def _notify_about_admin_status(bot: Bot, target_tg_id: int) -> None:
+    try:
+        await bot.send_message(
+            target_tg_id,
+            "🎉 Вам выданы права администратора.\n"
+            "Теперь вам доступно «Админ-меню».",
+        )
+    except Exception:
+        # Пользователь мог ни разу не начать чат с ботом или заблокировать бота.
+        pass
+
+
 @router.message(F.text == "Админ-меню")
 async def admin_menu_handler(
     message: Message, state: FSMContext, db: Database, config: Config
@@ -66,13 +78,41 @@ async def add_admin_start(message: Message, state: FSMContext, db: Database) -> 
 
 
 @router.message(AdminStates.waiting_for_admin_to_add, ~F.text.in_({"Назад"}))
-async def add_admin_finish(message: Message, state: FSMContext, db: Database) -> None:
+async def add_admin_finish(message: Message, state: FSMContext, db: Database, bot: Bot) -> None:
     if not db.is_admin(message.from_user.id):
         await message.answer("У вас нет прав администратора.")
         await state.clear()
         return
 
-    target, error = _resolve_admin_target(message.text or "", db)
+    raw = (message.text or "").strip()
+    if raw.startswith("@"):
+        user = db.get_user_by_username(raw)
+        if user:
+            target = int(user["tg_id"])
+            added = db.add_admin(target)
+            await state.clear()
+            if added:
+                await _notify_about_admin_status(bot, target)
+                await message.answer(f"Администратор @{raw.lstrip('@')} добавлен ✅")
+            else:
+                await message.answer(f"Пользователь @{raw.lstrip('@')} уже является администратором.")
+            return
+
+        added_to_pending = db.add_pending_admin_username(raw)
+        await state.clear()
+        if added_to_pending:
+            await message.answer(
+                f"Пользователь @{raw.lstrip('@')} пока не зарегистрирован.\n"
+                "Добавила его в список ожидания: как только он зайдёт в бота —\n"
+                "админ-права выдадутся автоматически ✅"
+            )
+        else:
+            await message.answer(
+                f"Пользователь @{raw.lstrip('@')} уже есть в списке ожидания."
+            )
+        return
+
+    target, error = _resolve_admin_target(raw, db)
     if error:
         await message.answer(error)
         return
@@ -80,7 +120,8 @@ async def add_admin_finish(message: Message, state: FSMContext, db: Database) ->
     added = db.add_admin(target)
     await state.clear()
     if added:
-        await message.answer(f"Администратор с ID {target} добавлен.")
+        await _notify_about_admin_status(bot, target)
+        await message.answer(f"Администратор с ID {target} добавлен ✅")
     else:
         await message.answer(f"Пользователь с ID {target} уже является администратором.")
 
