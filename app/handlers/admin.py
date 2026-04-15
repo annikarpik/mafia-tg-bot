@@ -56,6 +56,39 @@ async def _notify_about_admin_status(bot: Bot, target_tg_id: int) -> None:
         pass
 
 
+async def _notify_users_about_game_update(
+    bot: Bot,
+    db: Database,
+    game_id: int,
+    before: dict,
+    after: dict,
+) -> None:
+    changes: list[str] = []
+    if before["starts_at"] != after["starts_at"]:
+        changes.append(f"• Время игры: {before['starts_at']} -> {after['starts_at']}")
+    if before["location"] != after["location"]:
+        changes.append(f"• Место: {before['location']} -> {after['location']}")
+    if before["registration_until"] != after["registration_until"]:
+        changes.append(
+            "• Окончание регистрации: "
+            f"{before['registration_until']} -> {after['registration_until']}"
+        )
+
+    if not changes:
+        return
+
+    text = (
+        f"📣 Обновление по игре #{game_id}\n"
+        "Админ изменил параметры игры:\n"
+        f"{chr(10).join(changes)}"
+    )
+    for tg_id in db.list_game_user_tg_ids(game_id):
+        try:
+            await bot.send_message(tg_id, text)
+        except Exception:
+            pass
+
+
 def _games_short_list(db: Database) -> str:
     games = db.list_games()
     if not games:
@@ -358,7 +391,7 @@ async def edit_game_pick_field(message: Message, state: FSMContext, db: Database
 
 
 @router.message(AdminStates.waiting_for_edit_value, ~F.text.in_(BACK_BUTTONS))
-async def edit_game_apply(message: Message, state: FSMContext, db: Database) -> None:
+async def edit_game_apply(message: Message, state: FSMContext, db: Database, bot: Bot) -> None:
     if not db.is_admin(message.from_user.id):
         await state.clear()
         await message.answer("У вас нет прав администратора.")
@@ -390,6 +423,7 @@ async def edit_game_apply(message: Message, state: FSMContext, db: Database) -> 
         await state.clear()
         await message.answer("Игра больше не существует.")
         return
+    game_before = dict(game)
 
     starts_at = updates.get("starts_at", game["starts_at"])
     registration_until = updates.get("registration_until", game["registration_until"])
@@ -410,6 +444,13 @@ async def edit_game_apply(message: Message, state: FSMContext, db: Database) -> 
         await message.answer("Не удалось обновить игру.")
         return
     refreshed = db.get_game(game_id)
+    await _notify_users_about_game_update(
+        bot=bot,
+        db=db,
+        game_id=game_id,
+        before=game_before,
+        after=refreshed,
+    )
     await message.answer(
         "Игра обновлена ✅\n"
         f"#{game_id} | {refreshed['starts_at']} | {refreshed['location']} | рег. до {refreshed['registration_until']}"

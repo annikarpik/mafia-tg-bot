@@ -412,6 +412,29 @@ class Database:
         rows.sort(key=lambda row: row["starts_at"])
         return [dict(row) for row in rows]
 
+    def list_game_user_tg_ids(self, game_id: int) -> list[int]:
+        rows_main = self.conn.execute(
+            """
+            SELECT DISTINCT u.tg_id
+            FROM registrations r
+            JOIN users u ON u.id = r.user_id
+            WHERE r.game_id = ?
+            """,
+            (game_id,),
+        ).fetchall()
+        rows_reserve = self.conn.execute(
+            """
+            SELECT DISTINCT u.tg_id
+            FROM reserves r
+            JOIN users u ON u.id = r.user_id
+            WHERE r.game_id = ?
+            """,
+            (game_id,),
+        ).fetchall()
+        tg_ids = {int(row["tg_id"]) for row in rows_main}
+        tg_ids.update(int(row["tg_id"]) for row in rows_reserve)
+        return sorted(tg_ids)
+
     # --------------------------------------------------------- registrations
 
     def _user_registration(self, game_id: int, user_id: int) -> dict[str, Any] | None:

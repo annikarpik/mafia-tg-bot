@@ -15,6 +15,31 @@ from app.utils import ensure_superadmin
 router = Router(name="schedule")
 
 
+def _parse_dt(raw: str) -> datetime | None:
+    try:
+        return datetime.strptime(raw, "%d.%m.%Y %H:%M")
+    except (ValueError, TypeError):
+        return None
+
+
+def _game_status(starts_at: str, registration_until: str) -> str:
+    now = datetime.now()
+    start_dt = _parse_dt(starts_at)
+    registration_dt = _parse_dt(registration_until)
+    if start_dt and now >= start_dt:
+        return "🎬 Игра проведена"
+    if registration_dt and now >= registration_dt:
+        return "⛔ Регистрация закончена"
+    return "✅ Регистрация открыта"
+
+
+def _registered_count_text(game: dict) -> str:
+    main_count = int(game.get("hosts", 0)) + int(game.get("judges", 0)) + int(game.get("players", 0))
+    reserve_count = int(game.get("reserves", 0))
+    total = main_count + reserve_count
+    return f"👥 Зарегистрировались: {total} (основа: {main_count}, запас: {reserve_count})"
+
+
 def _can_cancel_for_user(db: Database, tg_id: int, game_id: int) -> bool:
     user = db.get_user_by_tg(tg_id)
     if not user:
@@ -147,6 +172,24 @@ async def schedule_handler(
 async def my_games_handler(message: Message, db: Database, config: Config) -> None:
     tg_id = message.from_user.id
     ensure_superadmin(tg_id, db, config)
+    if db.is_admin(tg_id):
+        games = db.list_games()
+        if not games:
+            await message.answer("Игр пока нет.")
+            return
+        lines = ["Все игры:"]
+        for game in games:
+            status = _game_status(
+                starts_at=game["starts_at"],
+                registration_until=game["registration_until"],
+            )
+            registered = _registered_count_text(game)
+            lines.append(
+                f"• #{game['id']} | {game['starts_at']} | {game['location']} | {status}\n  {registered}"
+            )
+        await message.answer("\n".join(lines))
+        return
+
     user = db.get_user_by_tg(tg_id)
     if not user:
         await message.answer("Сначала пройдите регистрацию: /start")
@@ -164,8 +207,14 @@ async def my_games_handler(message: Message, db: Database, config: Config) -> No
         else:
             role = item["role"]
             role_text = ROLE_LABELS.get(role, role)
+        status = _game_status(
+            starts_at=item["starts_at"],
+            registration_until=item["registration_until"],
+        )
+        game_counts = db.get_game_with_counts(int(item["id"]))
+        registered = _registered_count_text(game_counts or {})
         lines.append(
-            f"• #{item['id']} | {item['starts_at']} | {item['location']} | {role_text}"
+            f"• #{item['id']} | {item['starts_at']} | {item['location']} | {role_text} | {status}\n  {registered}"
         )
     await message.answer("\n".join(lines))
 
