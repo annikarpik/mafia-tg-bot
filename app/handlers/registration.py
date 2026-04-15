@@ -4,7 +4,12 @@ from aiogram.types import Message
 
 from app.config import Config
 from app.db.database import Database
-from app.keyboards.reply import main_keyboard, request_contact_keyboard, salutation_keyboard
+from app.keyboards.reply import (
+    affiliation_keyboard,
+    main_keyboard,
+    request_contact_keyboard,
+    salutation_keyboard,
+)
 from app.states import RegistrationStates
 from app.utils import ensure_admin_by_phone, ensure_superadmin
 
@@ -38,7 +43,9 @@ async def salutation_handler(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip().lower()
     salutation_map = {
         "господин": "господин",
+        "🤵 господин": "господин",
         "госпожа": "госпожа",
+        "👒 госпожа": "госпожа",
     }
     salutation = salutation_map.get(text)
     if not salutation:
@@ -46,6 +53,47 @@ async def salutation_handler(message: Message, state: FSMContext) -> None:
         return
 
     await state.update_data(salutation=salutation)
+    await state.set_state(RegistrationStates.waiting_for_full_name)
+    await message.answer("Отлично! Теперь введите ваше ФИО.")
+
+
+@router.message(RegistrationStates.waiting_for_full_name)
+async def full_name_handler(message: Message, state: FSMContext) -> None:
+    full_name = (message.text or "").strip()
+    if len(full_name) < 5:
+        await message.answer("Пожалуйста, введите полное ФИО (минимум 5 символов).")
+        return
+
+    await state.update_data(full_name=full_name)
+    await state.set_state(RegistrationStates.waiting_for_affiliation)
+    await message.answer(
+        "Укажите, пожалуйста, ваш статус по проходу:",
+        reply_markup=affiliation_keyboard(),
+    )
+
+
+@router.message(RegistrationStates.waiting_for_affiliation)
+async def affiliation_handler(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    affiliation_map = {
+        "С ВМК": "vmk",
+        "🎓 С ВМК": "vmk",
+        "Из МГУ, пропуск не нужен": "mgu_no_pass",
+        "🏛️ Из МГУ, пропуск не нужен": "mgu_no_pass",
+        "Вне МГУ, нужен пропуск": "outside_need_pass",
+        "🪪 Вне МГУ, нужен пропуск": "outside_need_pass",
+    }
+    affiliation = affiliation_map.get(text)
+    if not affiliation:
+        await message.answer(
+            "Выберите один из вариантов кнопками:\n"
+            "• С ВМК\n"
+            "• Из МГУ, пропуск не нужен\n"
+            "• Вне МГУ, нужен пропуск"
+        )
+        return
+
+    await state.update_data(affiliation=affiliation)
     await state.set_state(RegistrationStates.waiting_for_nickname)
     await message.answer("Супер! Теперь придумайте и введите свой уникальный никнейм ✍️")
 
@@ -67,12 +115,22 @@ async def nickname_handler(
     data = await state.get_data()
     phone = data.get("phone")
     salutation = data.get("salutation")
+    full_name = data.get("full_name")
+    affiliation = data.get("affiliation")
     if not phone:
         await message.answer("Что-то пошло не так. Начните заново: /start")
         await state.clear()
         return
     if salutation not in {"господин", "госпожа"}:
         await message.answer("Обращение не выбрано. Начните заново: /start")
+        await state.clear()
+        return
+    if not full_name:
+        await message.answer("ФИО не найдено. Начните заново: /start")
+        await state.clear()
+        return
+    if affiliation not in {"vmk", "mgu_no_pass", "outside_need_pass"}:
+        await message.answer("Статус прохода не выбран. Начните заново: /start")
         await state.clear()
         return
 
@@ -82,6 +140,8 @@ async def nickname_handler(
         phone=phone,
         nickname=nickname,
         salutation=salutation,
+        full_name=full_name,
+        affiliation=affiliation,
         username=message.from_user.username,
     )
     ensure_superadmin(tg_id, db, config)

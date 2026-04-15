@@ -59,6 +59,7 @@ def _game_card_text(db: Database, game: dict, game_id: int, prompt: str = "Вы�
         f"Игра #{game['id']} 🎭\n"
         f"Дата и время: {game['starts_at']}\n"
         f"Место: {game['location']}\n\n"
+        f"Регистрация до: {game['registration_until']}\n\n"
         f"{_participants_block(db, game_id)}\n\n"
         f"{prompt}"
     )
@@ -74,6 +75,26 @@ async def _refresh_game_card(callback: CallbackQuery, db: Database, game_id: int
         _game_card_text(db, game, game_id),
         reply_markup=roles_keyboard(game_id, game, can_cancel=can_cancel),
     )
+
+
+async def _notify_admins_about_pass_needed(callback: CallbackQuery, db: Database, game_id: int, user: dict) -> None:
+    if user.get("affiliation") != "outside_need_pass":
+        return
+    game = db.get_game(game_id)
+    if not game:
+        return
+    text = (
+        "🚨 Нужен пропуск для участника\n"
+        f"ФИО: {user.get('full_name') or '-'}\n"
+        f"Никнейм: {user['nickname']}\n"
+        f"Телефон: {user['phone']}\n"
+        f"Игра #{game_id}: {game['starts_at']} | {game['location']}"
+    )
+    for admin_tg_id in db.list_admins():
+        try:
+            await callback.bot.send_message(admin_tg_id, text)
+        except Exception:
+            pass
 
 
 def _player_until_options(starts_at: str) -> list[str]:
@@ -100,7 +121,7 @@ async def _ask_player_until(callback: CallbackQuery, db: Database, game_id: int)
     )
 
 
-@router.message(F.text == "Расписание игр")
+@router.message(F.text.in_({"Расписание игр", "🎭 Расписание игр"}))
 async def schedule_handler(
     message: Message, db: Database, config: Config
 ) -> None:
@@ -111,15 +132,42 @@ async def schedule_handler(
         await message.answer("Сначала пройдите регистрацию: /start")
         return
 
-    games = db.list_games()
+    games = db.list_open_games()
     if not games:
-        await message.answer("Пока нет запланированных игр 😌")
+        await message.answer("Пока нет игр с открытой регистрацией 😌")
         return
 
     await message.answer(
         f"Доступно игр: {len(games)} 🎲 Выберите игру:",
         reply_markup=games_keyboard(games),
     )
+
+
+@router.message(F.text.in_({"Список игр", "📋 Список игр"}))
+async def my_games_handler(message: Message, db: Database, config: Config) -> None:
+    tg_id = message.from_user.id
+    ensure_superadmin(tg_id, db, config)
+    user = db.get_user_by_tg(tg_id)
+    if not user:
+        await message.answer("Сначала пройдите регистрацию: /start")
+        return
+
+    items = db.list_user_games(int(user["id"]))
+    if not items:
+        await message.answer("Вы пока не зарегистрированы ни на одну игру.")
+        return
+
+    lines = ["Ваши игры:"]
+    for item in items:
+        if item["bucket"] == "reserve":
+            role_text = "Наблюдатель/Запас"
+        else:
+            role = item["role"]
+            role_text = ROLE_LABELS.get(role, role)
+        lines.append(
+            f"• #{item['id']} | {item['starts_at']} | {item['location']} | {role_text}"
+        )
+    await message.answer("\n".join(lines))
 
 
 @router.callback_query(F.data.startswith("game:"))
@@ -130,6 +178,9 @@ async def game_pick_handler(callback: CallbackQuery, db: Database) -> None:
         return
 
     game_id = int(callback.data.split(":")[1])
+    if not db.is_game_open(game_id):
+        await callback.answer("Регистрация на эту игру уже закрыта.", show_alert=True)
+        return
     game = db.get_game_with_counts(game_id)
     if not game:
         await callback.answer("Игра не найдена.", show_alert=True)
@@ -158,6 +209,9 @@ async def role_pick_handler(callback: CallbackQuery, db: Database) -> None:
 
     _, game_id_raw, role = callback.data.split(":")
     game_id = int(game_id_raw)
+    if not db.is_game_open(game_id):
+        await callback.answer("Регистрация на эту игру уже закрыта.", show_alert=True)
+        return
 
     if not db.get_game(game_id):
         await callback.answer("Игра не найдена.", show_alert=True)
@@ -168,7 +222,8 @@ async def role_pick_handler(callback: CallbackQuery, db: Database) -> None:
         await callback.answer("Вы не зарегистрированы.", show_alert=True)
         return
 
-    current = db.user_registration(game_id=game_id, user_id=int(user["id"]))
+    user_id = int(user["id"])
+    current = db.user_registration(game_id=game_id, user_id=user_id)
     if role == "player":
         if current and current["role"] != role:
             game = db.get_game_with_counts(game_id)
@@ -216,8 +271,11 @@ async def role_pick_handler(callback: CallbackQuery, db: Database) -> None:
         await callback.answer()
         return
 
-    _, text = db.register_user(game_id=game_id, user_id=int(user["id"]), role=role)
+    was_registered = current is not None
+    _, text = db.register_user(game_id=game_id, user_id=user_id, role=role)
     await _refresh_game_card(callback, db, game_id)
+    if not was_registered:
+        await _notify_admins_about_pass_needed(callback, db, game_id, user)
     await callback.answer(f"{text} ✅")
 
 
@@ -230,6 +288,9 @@ async def role_confirm_handler(callback: CallbackQuery, db: Database) -> None:
 
     _, game_id_raw, role = callback.data.split(":")
     game_id = int(game_id_raw)
+    if not db.is_game_open(game_id):
+        await callback.answer("Регистрация на эту игру уже закрыта.", show_alert=True)
+        return
     user = db.get_user_by_tg(tg_id)
     if not user:
         await callback.answer("Вы не зарегистрированы.", show_alert=True)
@@ -240,8 +301,11 @@ async def role_confirm_handler(callback: CallbackQuery, db: Database) -> None:
         await callback.answer()
         return
 
+    was_registered = db.user_registration(game_id=game_id, user_id=int(user["id"])) is not None
     _, text = db.register_user(game_id=game_id, user_id=int(user["id"]), role=role)
     await _refresh_game_card(callback, db, game_id)
+    if not was_registered:
+        await _notify_admins_about_pass_needed(callback, db, game_id, user)
     await callback.answer(f"{text} ✅")
 
 
@@ -262,6 +326,9 @@ async def player_until_handler(callback: CallbackQuery, db: Database) -> None:
 
     _, game_id_raw, until_token = callback.data.split(":")
     game_id = int(game_id_raw)
+    if not db.is_game_open(game_id):
+        await callback.answer("Регистрация на эту игру уже закрыта.", show_alert=True)
+        return
     game = db.get_game(game_id)
     if not game:
         await callback.answer("Игра не найдена.", show_alert=True)
@@ -278,6 +345,7 @@ async def player_until_handler(callback: CallbackQuery, db: Database) -> None:
         await callback.answer("Вы не зарегистрированы.", show_alert=True)
         return
 
+    was_registered = db.user_registration(game_id=game_id, user_id=int(user["id"])) is not None
     _, text = db.register_user(
         game_id=game_id,
         user_id=int(user["id"]),
@@ -285,6 +353,8 @@ async def player_until_handler(callback: CallbackQuery, db: Database) -> None:
         available_until=available_until,
     )
     await _refresh_game_card(callback, db, game_id)
+    if not was_registered:
+        await _notify_admins_about_pass_needed(callback, db, game_id, user)
     await callback.answer(f"{text} ✅")
 
 
@@ -297,6 +367,9 @@ async def unregister_handler(callback: CallbackQuery, db: Database) -> None:
 
     _, game_id_raw = callback.data.split(":")
     game_id = int(game_id_raw)
+    if not db.is_game_open(game_id):
+        await callback.answer("Регистрация на эту игру уже закрыта.", show_alert=True)
+        return
     user = db.get_user_by_tg(tg_id)
     if not user:
         await callback.answer("Вы не зарегистрированы.", show_alert=True)
@@ -342,6 +415,9 @@ async def reserve_handler(callback: CallbackQuery, db: Database) -> None:
         await callback.answer("Вы не зарегистрированы.", show_alert=True)
         return
 
-    _, text = db.add_to_reserve(game_id=game_id, user_id=int(user["id"]))
+    was_reserved = db.is_reserved(game_id=game_id, user_id=int(user["id"]))
+    success, text = db.add_to_reserve(game_id=game_id, user_id=int(user["id"]))
     await _refresh_game_card(callback, db, game_id)
+    if success and not was_reserved:
+        await _notify_admins_about_pass_needed(callback, db, game_id, user)
     await callback.answer(text)

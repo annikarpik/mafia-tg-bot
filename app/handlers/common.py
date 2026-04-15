@@ -45,7 +45,7 @@ async def start_handler(
     await state.set_state(RegistrationStates.waiting_for_contact)
 
 
-@router.message(F.text == "Назад")
+@router.message(F.text.in_({"Назад", "↩️ Назад"}))
 async def back_to_main_handler(
     message: Message, state: FSMContext, db: Database
 ) -> None:

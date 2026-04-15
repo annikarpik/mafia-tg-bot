@@ -2,6 +2,12 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
+AFFILIATION_LABELS: dict[str, str] = {
+    "vmk": "С ВМК",
+    "mgu_no_pass": "Из МГУ, пропуск не нужен",
+    "outside_need_pass": "Вне МГУ, нужен пропуск",
+}
+
 
 ROLE_LIMITS: dict[str, int] = {
     "host": 1,
@@ -22,6 +28,8 @@ CREATE TABLE IF NOT EXISTS users (
     phone      TEXT    NOT NULL,
     username   TEXT,
     salutation TEXT    NOT NULL DEFAULT 'господин',
+    full_name  TEXT,
+    affiliation TEXT   NOT NULL DEFAULT 'vmk',
     nickname   TEXT    UNIQUE NOT NULL,
     created_at TEXT    NOT NULL
 );
@@ -52,6 +60,7 @@ CREATE TABLE IF NOT EXISTS games (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     starts_at  TEXT    NOT NULL,
     location   TEXT    NOT NULL,
+    registration_until TEXT NOT NULL DEFAULT '',
     created_at TEXT    NOT NULL
 );
 
@@ -90,6 +99,22 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE users ADD COLUMN salutation TEXT NOT NULL DEFAULT 'господин'"
             )
+        if "full_name" not in columns:
+            self.conn.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
+        if "affiliation" not in columns:
+            self.conn.execute(
+                "ALTER TABLE users ADD COLUMN affiliation TEXT NOT NULL DEFAULT 'vmk'"
+            )
+
+        game_columns = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(games)").fetchall()
+        }
+        if "registration_until" not in game_columns:
+            self.conn.execute(
+                "ALTER TABLE games ADD COLUMN registration_until TEXT NOT NULL DEFAULT ''"
+            )
+            self.conn.execute("UPDATE games SET registration_until = starts_at WHERE registration_until = ''")
+
         reg_columns = {
             row["name"] for row in self.conn.execute("PRAGMA table_info(registrations)").fetchall()
         }
@@ -132,18 +157,26 @@ class Database:
             "SELECT 1 FROM users WHERE lower(nickname) = lower(?)", (nickname.strip(),)
         ).fetchone() is not None
 
+    def nickname_taken_excluding_user(self, nickname: str, user_id: int) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM users WHERE lower(nickname) = lower(?) AND id != ?",
+            (nickname.strip(), user_id),
+        ).fetchone() is not None
+
     def create_user(
         self,
         tg_id: int,
         phone: str,
         nickname: str,
         salutation: str,
+        full_name: str,
+        affiliation: str,
         username: str | None = None,
     ) -> int:
         now = datetime.utcnow().isoformat()
         cur = self.conn.execute(
-            "INSERT INTO users (tg_id, phone, username, salutation, nickname, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (tg_id, phone, username, salutation, nickname, now),
+            "INSERT INTO users (tg_id, phone, username, salutation, full_name, affiliation, nickname, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (tg_id, phone, username, salutation, full_name, affiliation, nickname, now),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -151,6 +184,17 @@ class Database:
     def update_user_username(self, tg_id: int, username: str | None) -> None:
         self.conn.execute("UPDATE users SET username = ? WHERE tg_id = ?", (username, tg_id))
         self.conn.commit()
+
+    def update_user_profile_field(self, user_id: int, field: str, value: str) -> bool:
+        allowed = {"salutation", "full_name", "affiliation", "nickname"}
+        if field not in allowed:
+            return False
+        cur = self.conn.execute(
+            f"UPDATE users SET {field} = ? WHERE id = ?",
+            (value, user_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     # ----------------------------------------------------------------- admins
 
@@ -198,11 +242,11 @@ class Database:
 
     # ------------------------------------------------------------------ games
 
-    def create_game(self, starts_at: str, location: str) -> int:
+    def create_game(self, starts_at: str, location: str, registration_until: str) -> int:
         now = datetime.utcnow().isoformat()
         cur = self.conn.execute(
-            "INSERT INTO games (starts_at, location, created_at) VALUES (?, ?, ?)",
-            (starts_at, location, now),
+            "INSERT INTO games (starts_at, location, registration_until, created_at) VALUES (?, ?, ?, ?)",
+            (starts_at, location, registration_until, now),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -220,6 +264,7 @@ class Database:
                 g.id,
                 g.starts_at,
                 g.location,
+                g.registration_until,
                 SUM(CASE WHEN r.role = 'host'   THEN 1 ELSE 0 END) AS hosts,
                 SUM(CASE WHEN r.role = 'judge'  THEN 1 ELSE 0 END) AS judges,
                 SUM(CASE WHEN r.role = 'player' THEN 1 ELSE 0 END) AS players,
@@ -239,6 +284,7 @@ class Database:
                 "id": int(r["id"]),
                 "starts_at": r["starts_at"],
                 "location": r["location"],
+                "registration_until": r["registration_until"],
                 "hosts": int(r["hosts"] or 0),
                 "judges": int(r["judges"] or 0),
                 "players": int(r["players"] or 0),
@@ -247,11 +293,61 @@ class Database:
             for r in rows
         ]
 
+    @staticmethod
+    def _parse_datetime(raw: str) -> datetime | None:
+        try:
+            return datetime.strptime(raw, "%d.%m.%Y %H:%M")
+        except ValueError:
+            return None
+
+    def list_open_games(self) -> list[dict[str, Any]]:
+        now = datetime.now()
+        games = []
+        for game in self.list_games():
+            until = self._parse_datetime(game["registration_until"])
+            if until is None or until >= now:
+                games.append(game)
+        return games
+
+    def is_game_open(self, game_id: int) -> bool:
+        game = self.get_game_with_counts(game_id)
+        if not game:
+            return False
+        until = self._parse_datetime(game["registration_until"])
+        if until is None:
+            return True
+        return until >= datetime.now()
+
     def get_game_with_counts(self, game_id: int) -> dict[str, Any] | None:
         for game in self.list_games():
             if game["id"] == game_id:
                 return game
         return None
+
+    def update_game(
+        self,
+        game_id: int,
+        starts_at: str | None = None,
+        location: str | None = None,
+        registration_until: str | None = None,
+    ) -> bool:
+        game = self.get_game(game_id)
+        if not game:
+            return False
+        new_starts_at = starts_at or game["starts_at"]
+        new_location = location or game["location"]
+        new_registration_until = registration_until or game["registration_until"]
+        cur = self.conn.execute(
+            "UPDATE games SET starts_at = ?, location = ?, registration_until = ? WHERE id = ?",
+            (new_starts_at, new_location, new_registration_until, game_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def delete_game(self, game_id: int) -> bool:
+        cur = self.conn.execute("DELETE FROM games WHERE id = ?", (game_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def list_game_registrations(self, game_id: int) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -292,6 +388,29 @@ class Database:
             (game_id,),
         ).fetchall()
         return [{"nickname": row["nickname"], "tg_id": int(row["tg_id"])} for row in rows]
+
+    def list_user_games(self, user_id: int) -> list[dict[str, Any]]:
+        rows_main = self.conn.execute(
+            """
+            SELECT g.id, g.starts_at, g.location, g.registration_until, r.role AS role, 'main' AS bucket
+            FROM registrations r
+            JOIN games g ON g.id = r.game_id
+            WHERE r.user_id = ?
+            """,
+            (user_id,),
+        ).fetchall()
+        rows_reserve = self.conn.execute(
+            """
+            SELECT g.id, g.starts_at, g.location, g.registration_until, NULL AS role, 'reserve' AS bucket
+            FROM reserves r
+            JOIN games g ON g.id = r.game_id
+            WHERE r.user_id = ?
+            """,
+            (user_id,),
+        ).fetchall()
+        rows = [*rows_main, *rows_reserve]
+        rows.sort(key=lambda row: row["starts_at"])
+        return [dict(row) for row in rows]
 
     # --------------------------------------------------------- registrations
 
