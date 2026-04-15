@@ -9,7 +9,7 @@ class Config:
     bot_token: str
     admin_phone: str
     superadmin_ids: frozenset[int]
-    db_path: str
+    db_dsn: str
 
 
 def _parse_admin_ids(raw: str) -> frozenset[int]:
@@ -29,17 +29,19 @@ def load_config() -> Config:
     load_dotenv()
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     admin_phone = _normalize_phone(os.getenv("ADMIN_PHONE", ""))
-    db_path = os.getenv("DB_PATH", "mafia_bot.db").strip()
+    db_dsn = (os.getenv("DB_DSN") or os.getenv("DATABASE_URL") or "").strip()
     superadmin_ids = _parse_admin_ids(os.getenv("SUPERADMIN_IDS", ""))
 
     if not bot_token:
         raise RuntimeError("BOT_TOKEN не задан в .env")
     if not admin_phone:
         raise RuntimeError("ADMIN_PHONE не задан в .env")
+    if not db_dsn:
+        raise RuntimeError("DB_DSN не задан в .env")
 
     return Config(
         bot_token=bot_token,
         admin_phone=admin_phone,
         superadmin_ids=superadmin_ids,
-        db_path=db_path,
+        db_dsn=db_dsn,
     )

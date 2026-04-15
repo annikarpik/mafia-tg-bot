@@ -1,13 +1,14 @@
-import sqlite3
 from datetime import datetime
 from typing import Any
+
+import psycopg
+from psycopg.rows import dict_row
 
 AFFILIATION_LABELS: dict[str, str] = {
     "vmk": "С ВМК",
     "mgu_no_pass": "Из МГУ, пропуск не нужен",
     "outside_need_pass": "Вне МГУ, нужен пропуск",
 }
-
 
 ROLE_LIMITS: dict[str, int] = {
     "host": 1,
@@ -21,123 +22,131 @@ ROLE_LABELS: dict[str, str] = {
     "player": "Игрок",
 }
 
-_INIT_SQL = """
-CREATE TABLE IF NOT EXISTS users (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    tg_id      INTEGER UNIQUE NOT NULL,
-    phone      TEXT    NOT NULL,
-    username   TEXT,
-    salutation TEXT    NOT NULL DEFAULT 'господин',
-    full_name  TEXT,
-    affiliation TEXT   NOT NULL DEFAULT 'vmk',
-    nickname   TEXT    UNIQUE NOT NULL,
-    created_at TEXT    NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS admins (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    tg_id      INTEGER UNIQUE NOT NULL,
-    created_at TEXT    NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS pending_admins (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    username   TEXT    UNIQUE NOT NULL,
-    created_at TEXT    NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS reserves (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    game_id    INTEGER NOT NULL,
-    user_id    INTEGER NOT NULL,
-    created_at TEXT    NOT NULL,
-    UNIQUE (game_id, user_id),
-    FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS games (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    starts_at  TEXT    NOT NULL,
-    location   TEXT    NOT NULL,
-    registration_until TEXT NOT NULL DEFAULT '',
-    created_at TEXT    NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS registrations (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    game_id    INTEGER NOT NULL,
-    user_id    INTEGER NOT NULL,
-    role       TEXT    NOT NULL CHECK(role IN ('host', 'judge', 'player')),
-    available_until TEXT,
-    created_at TEXT    NOT NULL,
-    UNIQUE (game_id, user_id),
-    FOREIGN KEY(game_id) REFERENCES games(id)  ON DELETE CASCADE,
-    FOREIGN KEY(user_id) REFERENCES users(id)  ON DELETE CASCADE
-);
-"""
-
 
 class Database:
-    def __init__(self, path: str) -> None:
-        self.conn = sqlite3.connect(path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(_INIT_SQL)
+    def __init__(self, dsn: str) -> None:
+        self.conn = psycopg.connect(dsn, row_factory=dict_row)
+        self.conn.autocommit = True
+        self._init_db()
         self._ensure_schema_columns()
-        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
 
+    def _init_db(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id BIGSERIAL PRIMARY KEY,
+                tg_id BIGINT UNIQUE NOT NULL,
+                phone TEXT NOT NULL,
+                username TEXT,
+                salutation TEXT NOT NULL DEFAULT 'господин',
+                full_name TEXT,
+                affiliation TEXT NOT NULL DEFAULT 'vmk',
+                nickname TEXT UNIQUE NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admins (
+                id BIGSERIAL PRIMARY KEY,
+                tg_id BIGINT UNIQUE NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_admins (
+                id BIGSERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS games (
+                id BIGSERIAL PRIMARY KEY,
+                starts_at TEXT NOT NULL,
+                location TEXT NOT NULL,
+                registration_until TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS registrations (
+                id BIGSERIAL PRIMARY KEY,
+                game_id BIGINT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+                user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                role TEXT NOT NULL CHECK(role IN ('host', 'judge', 'player')),
+                available_until TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE (game_id, user_id)
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reserves (
+                id BIGSERIAL PRIMARY KEY,
+                game_id BIGINT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+                user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                UNIQUE (game_id, user_id)
+            );
+            """
+        )
+
+    def _column_exists(self, table: str, column: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = %s
+              AND column_name = %s
+            """,
+            (table, column),
+        ).fetchone()
+        return row is not None
+
     def _ensure_schema_columns(self) -> None:
-        columns = {
-            row["name"] for row in self.conn.execute("PRAGMA table_info(users)").fetchall()
-        }
-        if "username" not in columns:
+        if not self._column_exists("users", "username"):
             self.conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
-        if "salutation" not in columns:
-            self.conn.execute(
-                "ALTER TABLE users ADD COLUMN salutation TEXT NOT NULL DEFAULT 'господин'"
-            )
-        if "full_name" not in columns:
+        if not self._column_exists("users", "salutation"):
+            self.conn.execute("ALTER TABLE users ADD COLUMN salutation TEXT NOT NULL DEFAULT 'господин'")
+        if not self._column_exists("users", "full_name"):
             self.conn.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
-        if "affiliation" not in columns:
-            self.conn.execute(
-                "ALTER TABLE users ADD COLUMN affiliation TEXT NOT NULL DEFAULT 'vmk'"
-            )
-
-        game_columns = {
-            row["name"] for row in self.conn.execute("PRAGMA table_info(games)").fetchall()
-        }
-        if "registration_until" not in game_columns:
-            self.conn.execute(
-                "ALTER TABLE games ADD COLUMN registration_until TEXT NOT NULL DEFAULT ''"
-            )
+        if not self._column_exists("users", "affiliation"):
+            self.conn.execute("ALTER TABLE users ADD COLUMN affiliation TEXT NOT NULL DEFAULT 'vmk'")
+        if not self._column_exists("games", "registration_until"):
+            self.conn.execute("ALTER TABLE games ADD COLUMN registration_until TEXT NOT NULL DEFAULT ''")
             self.conn.execute("UPDATE games SET registration_until = starts_at WHERE registration_until = ''")
-
-        reg_columns = {
-            row["name"] for row in self.conn.execute("PRAGMA table_info(registrations)").fetchall()
-        }
-        if "available_until" not in reg_columns:
+        if not self._column_exists("registrations", "available_until"):
             self.conn.execute("ALTER TABLE registrations ADD COLUMN available_until TEXT")
 
     # ------------------------------------------------------------------ users
-
     def user_exists(self, tg_id: int) -> bool:
-        return self.conn.execute(
-            "SELECT 1 FROM users WHERE tg_id = ?", (tg_id,)
-        ).fetchone() is not None
+        return self.conn.execute("SELECT 1 FROM users WHERE tg_id = %s", (tg_id,)).fetchone() is not None
 
     def get_user_by_tg(self, tg_id: int) -> dict[str, Any] | None:
-        row = self.conn.execute(
-            "SELECT * FROM users WHERE tg_id = ?", (tg_id,)
-        ).fetchone()
+        row = self.conn.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,)).fetchone()
         return dict(row) if row else None
 
     def get_user_by_phone(self, phone: str) -> dict[str, Any] | None:
         normalized = "".join(ch for ch in phone if ch.isdigit())
         row = self.conn.execute(
-            "SELECT * FROM users WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, '+', ''), ' ', ''), '-', ''), '(', ''), ')', '') = ?",
+            """
+            SELECT *
+            FROM users
+            WHERE regexp_replace(phone, '[^0-9]', '', 'g') = %s
+            """,
             (normalized,),
         ).fetchone()
         return dict(row) if row else None
@@ -147,19 +156,20 @@ class Database:
         if not clean:
             return None
         row = self.conn.execute(
-            "SELECT * FROM users WHERE lower(username) = lower(?)",
+            "SELECT * FROM users WHERE lower(username) = lower(%s)",
             (clean,),
         ).fetchone()
         return dict(row) if row else None
 
     def nickname_taken(self, nickname: str) -> bool:
         return self.conn.execute(
-            "SELECT 1 FROM users WHERE lower(nickname) = lower(?)", (nickname.strip(),)
+            "SELECT 1 FROM users WHERE lower(nickname) = lower(%s)",
+            (nickname.strip(),),
         ).fetchone() is not None
 
     def nickname_taken_excluding_user(self, nickname: str, user_id: int) -> bool:
         return self.conn.execute(
-            "SELECT 1 FROM users WHERE lower(nickname) = lower(?) AND id != ?",
+            "SELECT 1 FROM users WHERE lower(nickname) = lower(%s) AND id != %s",
             (nickname.strip(), user_id),
         ).fetchone() is not None
 
@@ -174,46 +184,43 @@ class Database:
         username: str | None = None,
     ) -> int:
         now = datetime.utcnow().isoformat()
-        cur = self.conn.execute(
-            "INSERT INTO users (tg_id, phone, username, salutation, full_name, affiliation, nickname, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        row = self.conn.execute(
+            """
+            INSERT INTO users (tg_id, phone, username, salutation, full_name, affiliation, nickname, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
             (tg_id, phone, username, salutation, full_name, affiliation, nickname, now),
-        )
-        self.conn.commit()
-        return int(cur.lastrowid)
+        ).fetchone()
+        return int(row["id"])
 
     def update_user_username(self, tg_id: int, username: str | None) -> None:
-        self.conn.execute("UPDATE users SET username = ? WHERE tg_id = ?", (username, tg_id))
-        self.conn.commit()
+        self.conn.execute("UPDATE users SET username = %s WHERE tg_id = %s", (username, tg_id))
 
     def update_user_profile_field(self, user_id: int, field: str, value: str) -> bool:
         allowed = {"salutation", "full_name", "affiliation", "nickname"}
         if field not in allowed:
             return False
         cur = self.conn.execute(
-            f"UPDATE users SET {field} = ? WHERE id = ?",
+            f"UPDATE users SET {field} = %s WHERE id = %s",
             (value, user_id),
         )
-        self.conn.commit()
         return cur.rowcount > 0
 
     # ----------------------------------------------------------------- admins
-
     def is_admin(self, tg_id: int) -> bool:
-        return self.conn.execute(
-            "SELECT 1 FROM admins WHERE tg_id = ?", (tg_id,)
-        ).fetchone() is not None
+        return self.conn.execute("SELECT 1 FROM admins WHERE tg_id = %s", (tg_id,)).fetchone() is not None
 
     def add_admin(self, tg_id: int) -> bool:
         now = datetime.utcnow().isoformat()
         cur = self.conn.execute(
-            "INSERT OR IGNORE INTO admins (tg_id, created_at) VALUES (?, ?)", (tg_id, now)
+            "INSERT INTO admins (tg_id, created_at) VALUES (%s, %s) ON CONFLICT (tg_id) DO NOTHING",
+            (tg_id, now),
         )
-        self.conn.commit()
         return cur.rowcount > 0
 
     def remove_admin(self, tg_id: int) -> bool:
-        cur = self.conn.execute("DELETE FROM admins WHERE tg_id = ?", (tg_id,))
-        self.conn.commit()
+        cur = self.conn.execute("DELETE FROM admins WHERE tg_id = %s", (tg_id,))
         return cur.rowcount > 0
 
     def list_admins(self) -> list[int]:
@@ -226,35 +233,33 @@ class Database:
             return False
         now = datetime.utcnow().isoformat()
         cur = self.conn.execute(
-            "INSERT OR IGNORE INTO pending_admins (username, created_at) VALUES (?, ?)",
+            "INSERT INTO pending_admins (username, created_at) VALUES (%s, %s) ON CONFLICT (username) DO NOTHING",
             (clean, now),
         )
-        self.conn.commit()
         return cur.rowcount > 0
 
     def consume_pending_admin_username(self, username: str) -> bool:
         clean = username.strip().lstrip("@").lower()
         if not clean:
             return False
-        cur = self.conn.execute("DELETE FROM pending_admins WHERE username = ?", (clean,))
-        self.conn.commit()
+        cur = self.conn.execute("DELETE FROM pending_admins WHERE username = %s", (clean,))
         return cur.rowcount > 0
 
     # ------------------------------------------------------------------ games
-
     def create_game(self, starts_at: str, location: str, registration_until: str) -> int:
         now = datetime.utcnow().isoformat()
-        cur = self.conn.execute(
-            "INSERT INTO games (starts_at, location, registration_until, created_at) VALUES (?, ?, ?, ?)",
+        row = self.conn.execute(
+            """
+            INSERT INTO games (starts_at, location, registration_until, created_at)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+            """,
             (starts_at, location, registration_until, now),
-        )
-        self.conn.commit()
-        return int(cur.lastrowid)
+        ).fetchone()
+        return int(row["id"])
 
     def get_game(self, game_id: int) -> dict[str, Any] | None:
-        row = self.conn.execute(
-            "SELECT * FROM games WHERE id = ?", (game_id,)
-        ).fetchone()
+        row = self.conn.execute("SELECT * FROM games WHERE id = %s", (game_id,)).fetchone()
         return dict(row) if row else None
 
     def list_games(self) -> list[dict[str, Any]]:
@@ -265,8 +270,8 @@ class Database:
                 g.starts_at,
                 g.location,
                 g.registration_until,
-                SUM(CASE WHEN r.role = 'host'   THEN 1 ELSE 0 END) AS hosts,
-                SUM(CASE WHEN r.role = 'judge'  THEN 1 ELSE 0 END) AS judges,
+                SUM(CASE WHEN r.role = 'host' THEN 1 ELSE 0 END) AS hosts,
+                SUM(CASE WHEN r.role = 'judge' THEN 1 ELSE 0 END) AS judges,
                 SUM(CASE WHEN r.role = 'player' THEN 1 ELSE 0 END) AS players,
                 (
                     SELECT COUNT(*)
@@ -275,7 +280,7 @@ class Database:
                 ) AS reserves
             FROM games g
             LEFT JOIN registrations r ON r.game_id = g.id
-            GROUP BY g.id
+            GROUP BY g.id, g.starts_at, g.location, g.registration_until
             ORDER BY g.starts_at
             """
         ).fetchall()
@@ -302,7 +307,7 @@ class Database:
 
     def list_open_games(self) -> list[dict[str, Any]]:
         now = datetime.now()
-        games = []
+        games: list[dict[str, Any]] = []
         for game in self.list_games():
             until = self._parse_datetime(game["registration_until"])
             if until is None or until >= now:
@@ -338,15 +343,17 @@ class Database:
         new_location = location or game["location"]
         new_registration_until = registration_until or game["registration_until"]
         cur = self.conn.execute(
-            "UPDATE games SET starts_at = ?, location = ?, registration_until = ? WHERE id = ?",
+            """
+            UPDATE games
+            SET starts_at = %s, location = %s, registration_until = %s
+            WHERE id = %s
+            """,
             (new_starts_at, new_location, new_registration_until, game_id),
         )
-        self.conn.commit()
         return cur.rowcount > 0
 
     def delete_game(self, game_id: int) -> bool:
-        cur = self.conn.execute("DELETE FROM games WHERE id = ?", (game_id,))
-        self.conn.commit()
+        cur = self.conn.execute("DELETE FROM games WHERE id = %s", (game_id,))
         return cur.rowcount > 0
 
     def list_game_registrations(self, game_id: int) -> list[dict[str, Any]]:
@@ -355,7 +362,7 @@ class Database:
             SELECT u.nickname, r.role, r.available_until
             FROM registrations r
             JOIN users u ON u.id = r.user_id
-            WHERE r.game_id = ?
+            WHERE r.game_id = %s
             ORDER BY
                 CASE r.role
                     WHEN 'host' THEN 1
@@ -382,7 +389,7 @@ class Database:
             SELECT u.nickname, u.tg_id
             FROM reserves r
             JOIN users u ON u.id = r.user_id
-            WHERE r.game_id = ?
+            WHERE r.game_id = %s
             ORDER BY r.created_at
             """,
             (game_id,),
@@ -395,7 +402,7 @@ class Database:
             SELECT g.id, g.starts_at, g.location, g.registration_until, r.role AS role, 'main' AS bucket
             FROM registrations r
             JOIN games g ON g.id = r.game_id
-            WHERE r.user_id = ?
+            WHERE r.user_id = %s
             """,
             (user_id,),
         ).fetchall()
@@ -404,7 +411,7 @@ class Database:
             SELECT g.id, g.starts_at, g.location, g.registration_until, NULL AS role, 'reserve' AS bucket
             FROM reserves r
             JOIN games g ON g.id = r.game_id
-            WHERE r.user_id = ?
+            WHERE r.user_id = %s
             """,
             (user_id,),
         ).fetchall()
@@ -418,7 +425,7 @@ class Database:
             SELECT DISTINCT u.tg_id
             FROM registrations r
             JOIN users u ON u.id = r.user_id
-            WHERE r.game_id = ?
+            WHERE r.game_id = %s
             """,
             (game_id,),
         ).fetchall()
@@ -427,7 +434,7 @@ class Database:
             SELECT DISTINCT u.tg_id
             FROM reserves r
             JOIN users u ON u.id = r.user_id
-            WHERE r.game_id = ?
+            WHERE r.game_id = %s
             """,
             (game_id,),
         ).fetchall()
@@ -436,10 +443,9 @@ class Database:
         return sorted(tg_ids)
 
     # --------------------------------------------------------- registrations
-
     def _user_registration(self, game_id: int, user_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
-            "SELECT * FROM registrations WHERE game_id = ? AND user_id = ?",
+            "SELECT * FROM registrations WHERE game_id = %s AND user_id = %s",
             (game_id, user_id),
         ).fetchone()
         return dict(row) if row else None
@@ -449,15 +455,14 @@ class Database:
 
     def unregister_user(self, game_id: int, user_id: int) -> bool:
         cur = self.conn.execute(
-            "DELETE FROM registrations WHERE game_id = ? AND user_id = ?",
+            "DELETE FROM registrations WHERE game_id = %s AND user_id = %s",
             (game_id, user_id),
         )
-        self.conn.commit()
         return cur.rowcount > 0
 
     def is_reserved(self, game_id: int, user_id: int) -> bool:
         row = self.conn.execute(
-            "SELECT 1 FROM reserves WHERE game_id = ? AND user_id = ?",
+            "SELECT 1 FROM reserves WHERE game_id = %s AND user_id = %s",
             (game_id, user_id),
         ).fetchone()
         return row is not None
@@ -467,49 +472,59 @@ class Database:
             return False, "Вы уже записаны на эту игру в основной состав."
         now = datetime.utcnow().isoformat()
         cur = self.conn.execute(
-            "INSERT OR IGNORE INTO reserves (game_id, user_id, created_at) VALUES (?, ?, ?)",
+            """
+            INSERT INTO reserves (game_id, user_id, created_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (game_id, user_id) DO NOTHING
+            """,
             (game_id, user_id, now),
         )
-        self.conn.commit()
         if cur.rowcount == 0:
             return False, "Вы уже находитесь в запасе на эту игру."
         return True, "Вы записаны в Наблюдатель/Запас."
 
     def remove_from_reserve(self, game_id: int, user_id: int) -> bool:
         cur = self.conn.execute(
-            "DELETE FROM reserves WHERE game_id = ? AND user_id = ?",
+            "DELETE FROM reserves WHERE game_id = %s AND user_id = %s",
             (game_id, user_id),
         )
-        self.conn.commit()
         return cur.rowcount > 0
 
     def promote_next_reserve_to_player(self, game_id: int) -> dict[str, Any] | None:
-        row = self.conn.execute(
-            """
-            SELECT r.id AS reserve_id, u.id AS user_id, u.tg_id, u.nickname
-            FROM reserves r
-            JOIN users u ON u.id = r.user_id
-            WHERE r.game_id = ?
-            ORDER BY r.created_at
-            LIMIT 1
-            """,
-            (game_id,),
-        ).fetchone()
-        if not row:
-            return None
+        with self.conn.transaction():
+            row = self.conn.execute(
+                """
+                SELECT r.id AS reserve_id, u.id AS user_id, u.tg_id, u.nickname
+                FROM reserves r
+                JOIN users u ON u.id = r.user_id
+                WHERE r.game_id = %s
+                ORDER BY r.created_at
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                (game_id,),
+            ).fetchone()
+            if not row:
+                return None
 
-        now = datetime.utcnow().isoformat()
-        self.conn.execute("DELETE FROM reserves WHERE id = ?", (row["reserve_id"],))
-        self.conn.execute(
-            "INSERT OR REPLACE INTO registrations (game_id, user_id, role, available_until, created_at) VALUES (?, ?, 'player', NULL, ?)",
-            (game_id, row["user_id"], now),
-        )
-        self.conn.commit()
+            now = datetime.utcnow().isoformat()
+            self.conn.execute("DELETE FROM reserves WHERE id = %s", (row["reserve_id"],))
+            self.conn.execute(
+                """
+                INSERT INTO registrations (game_id, user_id, role, available_until, created_at)
+                VALUES (%s, %s, 'player', NULL, %s)
+                ON CONFLICT (game_id, user_id) DO UPDATE
+                    SET role = EXCLUDED.role,
+                        available_until = EXCLUDED.available_until,
+                        created_at = EXCLUDED.created_at
+                """,
+                (game_id, row["user_id"], now),
+            )
         return {"tg_id": int(row["tg_id"]), "nickname": row["nickname"]}
 
     def _role_count(self, game_id: int, role: str) -> int:
         row = self.conn.execute(
-            "SELECT COUNT(*) AS cnt FROM registrations WHERE game_id = ? AND role = ?",
+            "SELECT COUNT(*) AS cnt FROM registrations WHERE game_id = %s AND role = %s",
             (game_id, role),
         ).fetchone()
         return int(row["cnt"]) if row else 0
@@ -534,10 +549,13 @@ class Database:
                     return False, "Вы уже записаны на эту игру с выбранным временем."
                 now = datetime.utcnow().isoformat()
                 self.conn.execute(
-                    "UPDATE registrations SET available_until = ?, created_at = ? WHERE id = ?",
+                    """
+                    UPDATE registrations
+                    SET available_until = %s, created_at = %s
+                    WHERE id = %s
+                    """,
                     (available_until, now, existing["id"]),
                 )
-                self.conn.commit()
                 if available_until:
                     return True, f"Обновили время: вы можете играть до {available_until}."
                 return True, "Обновили запись: вы можете играть без ограничения по времени."
@@ -550,15 +568,21 @@ class Database:
         now = datetime.utcnow().isoformat()
         if existing:
             self.conn.execute(
-                "UPDATE registrations SET role = ?, available_until = ?, created_at = ? WHERE id = ?",
+                """
+                UPDATE registrations
+                SET role = %s, available_until = %s, created_at = %s
+                WHERE id = %s
+                """,
                 (role, available_until, now, existing["id"]),
             )
         else:
             self.conn.execute(
-                "INSERT INTO registrations (game_id, user_id, role, available_until, created_at) VALUES (?, ?, ?, ?, ?)",
+                """
+                INSERT INTO registrations (game_id, user_id, role, available_until, created_at)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
                 (game_id, user_id, role, available_until, now),
             )
-        self.conn.commit()
         if role == "player":
             if available_until:
                 return True, f"Вы успешно записались на игру в роли: Игрок (до {available_until})."

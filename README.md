@@ -32,23 +32,50 @@
    pip install -r requirements.txt
    ```
 
-3. Создать `.env` на основе примера:
+3. Поднять PostgreSQL через Docker Compose:
+
+   ```bash
+   docker compose up -d postgres
+   ```
+
+4. Создать `.env` на основе примера:
 
    ```bash
    cp .env.example .env
    ```
 
-4. Заполнить переменные в `.env`:
+5. Заполнить переменные в `.env`:
    - `BOT_TOKEN` — токен бота от BotFather;
   - `ADMIN_PHONE` — номер телефона администратора;
    - `SUPERADMIN_IDS` — список Telegram ID через запятую (эти пользователи автоматически админы);
-   - `DB_PATH` — путь до SQLite базы.
+   - `DB_DSN` — строка подключения к PostgreSQL, например:
+     `postgresql://postgres:postgres@localhost:5432/mafia_bot`.
 
-5. Запустить:
+6. Запустить:
 
    ```bash
    python bot.py
    ```
+
+## Полезные команды Docker
+
+- Проверить статус контейнера:
+
+  ```bash
+  docker compose ps
+  ```
+
+- Посмотреть логи PostgreSQL:
+
+  ```bash
+  docker compose logs -f postgres
+  ```
+
+- Остановить PostgreSQL:
+
+  ```bash
+  docker compose stop postgres
+  ```
 
 ## Основные команды
 

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     config = load_config()
-    db = Database(config.db_path)
+    db = Database(config.db_dsn)
     bot = Bot(token=config.bot_token)
     dp = Dispatcher()
 
