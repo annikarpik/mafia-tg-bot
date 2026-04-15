@@ -16,6 +16,16 @@ def request_contact_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def salutation_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Господин"), KeyboardButton(text="Госпожа")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
 def admin_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[

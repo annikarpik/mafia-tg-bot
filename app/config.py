@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 @dataclass(frozen=True)
 class Config:
     bot_token: str
-    admin_password: str
+    admin_phone: str
     superadmin_ids: frozenset[int]
     db_path: str
 
@@ -21,21 +21,25 @@ def _parse_admin_ids(raw: str) -> frozenset[int]:
     return frozenset(result)
 
 
+def _normalize_phone(raw: str) -> str:
+    return "".join(ch for ch in raw if ch.isdigit())
+
+
 def load_config() -> Config:
     load_dotenv()
     bot_token = os.getenv("BOT_TOKEN", "").strip()
-    admin_password = os.getenv("ADMIN_PASSWORD", "").strip()
+    admin_phone = _normalize_phone(os.getenv("ADMIN_PHONE", ""))
     db_path = os.getenv("DB_PATH", "mafia_bot.db").strip()
     superadmin_ids = _parse_admin_ids(os.getenv("SUPERADMIN_IDS", ""))
 
     if not bot_token:
         raise RuntimeError("BOT_TOKEN не задан в .env")
-    if not admin_password:
-        raise RuntimeError("ADMIN_PASSWORD не задан в .env")
+    if not admin_phone:
+        raise RuntimeError("ADMIN_PHONE не задан в .env")
 
     return Config(
         bot_token=bot_token,
-        admin_password=admin_password,
+        admin_phone=admin_phone,
         superadmin_ids=superadmin_ids,
         db_path=db_path,
     )

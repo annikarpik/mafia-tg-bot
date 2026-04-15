@@ -4,11 +4,35 @@ from aiogram.types import Message
 
 from app.config import Config
 from app.db.database import Database
-from app.keyboards.reply import admin_menu_keyboard, main_keyboard
+from app.keyboards.reply import admin_menu_keyboard
 from app.states import AdminStates
-from app.utils import ensure_superadmin, parse_game_datetime
+from app.utils import ensure_superadmin, normalize_phone, parse_game_datetime
 
 router = Router(name="admin")
+
+
+def _resolve_admin_target(raw_value: str, db: Database) -> tuple[int | None, str | None]:
+    raw = raw_value.strip()
+    if not raw:
+        return None, "Введите Telegram ID, номер телефона или @username."
+
+    if raw.lstrip("-").isdigit():
+        return int(raw), None
+
+    if raw.startswith("@"):
+        user = db.get_user_by_username(raw)
+        if not user:
+            return None, "Пользователь с таким @username не найден среди зарегистрированных."
+        return int(user["tg_id"]), None
+
+    phone = normalize_phone(raw)
+    if len(phone) >= 10:
+        user = db.get_user_by_phone(phone)
+        if not user:
+            return None, "Пользователь с таким номером не найден среди зарегистрированных."
+        return int(user["tg_id"]), None
+
+    return None, "Неверный формат. Введите Telegram ID, номер телефона или @username."
 
 
 @router.message(F.text == "Админ-меню")
@@ -23,7 +47,7 @@ async def admin_menu_handler(
         return
 
     await state.clear()
-    await message.answer("Админ-меню:", reply_markup=admin_menu_keyboard())
+    await message.answer("Админ-меню 🛠️", reply_markup=admin_menu_keyboard())
 
 
 # ------------------------------------------------------------ add admin flow
@@ -36,7 +60,8 @@ async def add_admin_start(message: Message, state: FSMContext, db: Database) -> 
 
     await state.set_state(AdminStates.waiting_for_admin_to_add)
     await message.answer(
-        "Введите Telegram ID пользователя, которого хотите назначить администратором."
+        "Введите Telegram ID, номер телефона или @username пользователя,\n"
+        "которого хотите назначить администратором."
     )
 
 
@@ -47,12 +72,11 @@ async def add_admin_finish(message: Message, state: FSMContext, db: Database) ->
         await state.clear()
         return
 
-    raw = (message.text or "").strip()
-    if not raw.lstrip("-").isdigit():
-        await message.answer("ID должен быть числом. Попробуйте снова.")
+    target, error = _resolve_admin_target(message.text or "", db)
+    if error:
+        await message.answer(error)
         return
 
-    target = int(raw)
     added = db.add_admin(target)
     await state.clear()
     if added:
@@ -72,7 +96,7 @@ async def remove_admin_start(message: Message, state: FSMContext, db: Database) 
     admins = db.list_admins()
     await state.set_state(AdminStates.waiting_for_admin_to_remove)
     await message.answer(
-        "Введите Telegram ID администратора для удаления.\n"
+        "Введите Telegram ID, номер телефона или @username администратора для удаления.\n"
         f"Текущие администраторы: {', '.join(map(str, admins)) if admins else 'нет'}"
     )
 
@@ -84,12 +108,11 @@ async def remove_admin_finish(message: Message, state: FSMContext, db: Database)
         await state.clear()
         return
 
-    raw = (message.text or "").strip()
-    if not raw.lstrip("-").isdigit():
-        await message.answer("ID должен быть числом. Попробуйте снова.")
+    target, error = _resolve_admin_target(message.text or "", db)
+    if error:
+        await message.answer(error)
         return
 
-    target = int(raw)
     if target == message.from_user.id:
         await message.answer("Нельзя удалить самого себя из администраторов.")
         return
@@ -111,7 +134,10 @@ async def create_game_start(message: Message, state: FSMContext, db: Database) -
         return
 
     await state.set_state(AdminStates.waiting_for_game_datetime)
-    await message.answer("Введите дату и время игры в формате ДД.ММ.ГГГГ ЧЧ:ММ\nПример: 21.06.2026 19:30")
+    await message.answer(
+        "Введите дату и время игры в формате ДД.ММ.ГГГГ ЧЧ:ММ\n"
+        "Пример: 21.06.2026 19:30"
+    )
 
 
 @router.message(AdminStates.waiting_for_game_datetime, ~F.text.in_({"Назад"}))
@@ -155,7 +181,7 @@ async def create_game_location(message: Message, state: FSMContext, db: Database
     game_id = db.create_game(starts_at=starts_at, location=location)
     await state.clear()
     await message.answer(
-        f"Игра создана!\n"
+        f"Игра создана! ✅\n"
         f"Номер: #{game_id}\n"
         f"Когда: {starts_at}\n"
         f"Где: {location}"

@@ -2,11 +2,27 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
 from app.config import Config
-from app.db.database import Database
+from app.db.database import Database, ROLE_LABELS
 from app.keyboards.inline import games_keyboard, roles_keyboard
 from app.utils import ensure_superadmin
 
 router = Router(name="schedule")
+
+
+def _participants_block(db: Database, game_id: int) -> str:
+    role_order = ("host", "judge", "player")
+    grouped: dict[str, list[str]] = {key: [] for key in role_order}
+    for row in db.list_game_registrations(game_id):
+        grouped.setdefault(row["role"], []).append(row["nickname"])
+
+    lines: list[str] = ["Уже записались:"]
+    for role in role_order:
+        label = ROLE_LABELS[role]
+        people = grouped.get(role, [])
+        lines.append(
+            f"• {label}: {', '.join(people) if people else 'пока никого'}"
+        )
+    return "\n".join(lines)
 
 
 @router.message(F.text == "Расписание игр")
@@ -22,11 +38,11 @@ async def schedule_handler(
 
     games = db.list_games()
     if not games:
-        await message.answer("Пока нет запланированных игр.")
+        await message.answer("Пока нет запланированных игр 😌")
         return
 
     await message.answer(
-        f"Доступно игр: {len(games)}. Выберите игру:",
+        f"Доступно игр: {len(games)} 🎲 Выберите игру:",
         reply_markup=games_keyboard(games),
     )
 
@@ -45,9 +61,10 @@ async def game_pick_handler(callback: CallbackQuery, db: Database) -> None:
         return
 
     await callback.message.answer(
-        f"Игра #{game['id']}\n"
+        f"Игра #{game['id']} 🎭\n"
         f"Дата и время: {game['starts_at']}\n"
         f"Место: {game['location']}\n\n"
+        f"{_participants_block(db, game_id)}\n\n"
         "Выберите роль:",
         reply_markup=roles_keyboard(game_id, game),
     )
@@ -56,7 +73,7 @@ async def game_pick_handler(callback: CallbackQuery, db: Database) -> None:
 
 @router.callback_query(F.data == "role_cancel")
 async def role_cancel_handler(callback: CallbackQuery) -> None:
-    await callback.answer("Отменено.")
+    await callback.answer("Отменено")
     await callback.message.delete()
 
 
@@ -81,7 +98,7 @@ async def role_pick_handler(callback: CallbackQuery, db: Database) -> None:
 
     _, text = db.register_user(game_id=game_id, user_id=int(user["id"]), role=role)
     await callback.answer()
-    await callback.message.answer(text)
+    await callback.message.answer(f"{text} ✅")
 
     refreshed = db.get_game_with_counts(game_id)
     if refreshed:

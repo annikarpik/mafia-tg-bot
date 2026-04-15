@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS users (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     tg_id      INTEGER UNIQUE NOT NULL,
     phone      TEXT    NOT NULL,
+    username   TEXT,
+    salutation TEXT    NOT NULL DEFAULT 'господин',
     nickname   TEXT    UNIQUE NOT NULL,
     created_at TEXT    NOT NULL
 );
@@ -55,10 +57,22 @@ class Database:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_INIT_SQL)
+        self._ensure_schema_columns()
         self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
+
+    def _ensure_schema_columns(self) -> None:
+        columns = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "username" not in columns:
+            self.conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
+        if "salutation" not in columns:
+            self.conn.execute(
+                "ALTER TABLE users ADD COLUMN salutation TEXT NOT NULL DEFAULT 'господин'"
+            )
 
     # ------------------------------------------------------------------ users
 
@@ -73,19 +87,48 @@ class Database:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_user_by_phone(self, phone: str) -> dict[str, Any] | None:
+        normalized = "".join(ch for ch in phone if ch.isdigit())
+        row = self.conn.execute(
+            "SELECT * FROM users WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, '+', ''), ' ', ''), '-', ''), '(', ''), ')', '') = ?",
+            (normalized,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_user_by_username(self, username: str) -> dict[str, Any] | None:
+        clean = username.strip().lstrip("@")
+        if not clean:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM users WHERE lower(username) = lower(?)",
+            (clean,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def nickname_taken(self, nickname: str) -> bool:
         return self.conn.execute(
             "SELECT 1 FROM users WHERE lower(nickname) = lower(?)", (nickname.strip(),)
         ).fetchone() is not None
 
-    def create_user(self, tg_id: int, phone: str, nickname: str) -> int:
+    def create_user(
+        self,
+        tg_id: int,
+        phone: str,
+        nickname: str,
+        salutation: str,
+        username: str | None = None,
+    ) -> int:
         now = datetime.utcnow().isoformat()
         cur = self.conn.execute(
-            "INSERT INTO users (tg_id, phone, nickname, created_at) VALUES (?, ?, ?, ?)",
-            (tg_id, phone, nickname, now),
+            "INSERT INTO users (tg_id, phone, username, salutation, nickname, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (tg_id, phone, username, salutation, nickname, now),
         )
         self.conn.commit()
         return int(cur.lastrowid)
+
+    def update_user_username(self, tg_id: int, username: str | None) -> None:
+        self.conn.execute("UPDATE users SET username = ? WHERE tg_id = ?", (username, tg_id))
+        self.conn.commit()
 
     # ----------------------------------------------------------------- admins
 
@@ -161,6 +204,26 @@ class Database:
             if game["id"] == game_id:
                 return game
         return None
+
+    def list_game_registrations(self, game_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT u.nickname, r.role
+            FROM registrations r
+            JOIN users u ON u.id = r.user_id
+            WHERE r.game_id = ?
+            ORDER BY
+                CASE r.role
+                    WHEN 'host' THEN 1
+                    WHEN 'judge' THEN 2
+                    WHEN 'player' THEN 3
+                    ELSE 4
+                END,
+                lower(u.nickname)
+            """,
+            (game_id,),
+        ).fetchall()
+        return [{"nickname": row["nickname"], "role": row["role"]} for row in rows]
 
     # --------------------------------------------------------- registrations
 
