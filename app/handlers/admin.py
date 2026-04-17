@@ -4,7 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from app.config import Config
-from app.db.database import Database
+from app.db.database import Database, ROLE_LABELS
 from app.keyboards.reply import admin_menu_keyboard, game_edit_field_keyboard
 from app.states import AdminStates
 from app.utils import ensure_superadmin, normalize_phone, parse_game_datetime
@@ -99,6 +99,47 @@ def _games_short_list(db: Database) -> str:
             f"• #{game['id']} | {game['starts_at']} | {game['location']} | рег. до {game['registration_until']}"
         )
     return "\n".join(lines)
+
+
+def _to_minutes(raw: str) -> int | None:
+    try:
+        hh, mm = raw.split(":")
+        return int(hh) * 60 + int(mm)
+    except (ValueError, TypeError):
+        return None
+
+
+def _time_from_starts_at(starts_at: str) -> str | None:
+    dt = _to_dt(starts_at)
+    if not dt:
+        return None
+    return dt.strftime("%H:%M")
+
+
+def _hourly_intervals(start_time: str) -> list[tuple[str, str]]:
+    start_min = _to_minutes(start_time)
+    if start_min is None:
+        return []
+    end_day = 22 * 60
+    intervals: list[tuple[str, str]] = []
+    current = start_min
+    while current < end_day:
+        nxt = min(current + 60, end_day)
+        intervals.append((f"{current // 60:02d}:{current % 60:02d}", f"{nxt // 60:02d}:{nxt % 60:02d}"))
+        current = nxt
+    return intervals
+
+
+def _is_available_on_interval(row: dict, interval_start: str, interval_end: str, game_start: str) -> bool:
+    from_raw = row.get("available_from") or game_start
+    until_raw = row.get("available_until") or "22:00"
+    from_min = _to_minutes(from_raw)
+    until_min = _to_minutes(until_raw)
+    start_min = _to_minutes(interval_start)
+    end_min = _to_minutes(interval_end)
+    if None in {from_min, until_min, start_min, end_min}:
+        return False
+    return from_min <= start_min and until_min >= end_min
 
 
 @router.message(F.text.in_({"Админ-меню", "🛠️ Админ-меню"}))
@@ -330,6 +371,69 @@ async def edit_game_start(message: Message, state: FSMContext, db: Database) -> 
         return
     await state.set_state(AdminStates.waiting_for_game_id_to_edit)
     await message.answer(f"{_games_short_list(db)}\n\nВведите ID игры для редактирования.")
+
+
+@router.message(F.text.in_({"Почасовой состав", "📈 Почасовой состав"}))
+async def hourly_roster_start(message: Message, state: FSMContext, db: Database) -> None:
+    if not db.is_admin(message.from_user.id):
+        await message.answer("У вас нет прав администратора.")
+        return
+    await state.set_state(AdminStates.waiting_for_game_id_to_hourly)
+    await message.answer(f"{_games_short_list(db)}\n\nВведите ID игры для просмотра почасового состава.")
+
+
+@router.message(AdminStates.waiting_for_game_id_to_hourly, ~F.text.in_(BACK_BUTTONS))
+async def hourly_roster_show(message: Message, state: FSMContext, db: Database) -> None:
+    if not db.is_admin(message.from_user.id):
+        await state.clear()
+        await message.answer("У вас нет прав администратора.")
+        return
+
+    raw = (message.text or "").strip()
+    if not raw.isdigit():
+        await message.answer("ID должен быть числом.")
+        return
+
+    game_id = int(raw)
+    game = db.get_game(game_id)
+    if not game:
+        await message.answer("Игра с таким ID не найдена.")
+        return
+
+    game_start = _time_from_starts_at(game["starts_at"])
+    if not game_start:
+        await message.answer("Не удалось распознать время игры.")
+        await state.clear()
+        return
+
+    rows = db.list_game_registrations(game_id)
+    intervals = _hourly_intervals(game_start)
+    if not intervals:
+        await message.answer("Для этой игры нет часовых интервалов до 22:00.")
+        await state.clear()
+        return
+
+    lines: list[str] = [
+        f"📈 Почасовой состав игры #{game_id}",
+        f"Когда: {game['starts_at']}",
+        f"Где: {game['location']}",
+        "",
+    ]
+    for idx, (start_at, end_at) in enumerate(intervals):
+        lines.append(f"с {start_at} до {end_at}")
+        for role in ("host", "judge", "player"):
+            label = ROLE_LABELS[role]
+            names = [
+                row["nickname"]
+                for row in rows
+                if row["role"] == role and _is_available_on_interval(row, start_at, end_at, game_start)
+            ]
+            lines.append(f"• {label}: {', '.join(names) if names else 'пока никого'}")
+        if idx < len(intervals) - 1:
+            lines.append("____________")
+
+    await state.clear()
+    await message.answer("\n".join(lines))
 
 
 @router.message(AdminStates.waiting_for_game_id_to_edit, ~F.text.in_(BACK_BUTTONS))

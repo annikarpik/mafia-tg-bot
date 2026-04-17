@@ -17,6 +17,7 @@ class AdminStates(StatesGroup):
     waiting_for_game_location = State()
     waiting_for_game_id_to_delete = State()
     waiting_for_game_id_to_edit = State()
+    waiting_for_game_id_to_hourly = State()
     waiting_for_edit_field = State()
     waiting_for_edit_value = State()
 

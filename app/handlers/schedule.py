@@ -61,26 +61,34 @@ def _participants_block(db: Database, game_id: int) -> str:
     players = grouped.get("player", [])
     reserves = db.list_game_reserves(game_id)
 
+    def _time_suffix(row: dict) -> str:
+        available_from = row.get("available_from")
+        available_until = row.get("available_until")
+        if available_from and available_until:
+            return f" (с {available_from} до {available_until})"
+        if available_from:
+            return f" (с {available_from})"
+        if available_until:
+            return f" (до {available_until})"
+        return ""
+
     if hosts:
         host = hosts[0]
-        host_until = f" (до {host['available_until']})" if host.get("available_until") else ""
-        lines.append(f"• Ведущий: {host['nickname']}{host_until}")
+        lines.append(f"• Ведущий: {host['nickname']}{_time_suffix(host)}")
     else:
         lines.append("• Ведущий: пока никого")
 
     if judges:
         judge_rows: list[str] = []
         for row in judges:
-            judge_until = f" (до {row['available_until']})" if row.get("available_until") else ""
-            judge_rows.append(f"{row['nickname']}{judge_until}")
+            judge_rows.append(f"{row['nickname']}{_time_suffix(row)}")
         lines.append(f"• Судьи: {', '.join(judge_rows)}")
     else:
         lines.append("• Судьи: пока никого")
     lines.append("• Игроки:")
     if players:
         for idx, row in enumerate(players, start=1):
-            until_suffix = f" (до {row['available_until']})" if row.get("available_until") else ""
-            lines.append(f"  {idx}. {row['nickname']}{until_suffix}")
+            lines.append(f"  {idx}. {row['nickname']}{_time_suffix(row)}")
     else:
         lines.append("  пока никого")
     lines.append("• Наблюдатель/Запас:")
