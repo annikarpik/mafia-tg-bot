@@ -1,7 +1,7 @@
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.config import Config
 from app.db.database import Database, ROLE_LABELS
@@ -152,8 +152,15 @@ def _player_until_options(starts_at: str) -> list[str]:
         start_dt = datetime.strptime(starts_at, "%d.%m.%Y %H:%M")
     except ValueError:
         return []
-    start_hour = start_dt.hour
-    return [f"{hour:02d}:00" for hour in range(start_hour + 1, 23)]
+    end_dt = start_dt.replace(hour=22, minute=30)
+    options: list[str] = []
+    current = start_dt.replace(second=0, microsecond=0)
+    while True:
+        current = current + timedelta(hours=1)
+        if current > end_dt:
+            break
+        options.append(current.strftime("%H:%M"))
+    return options
 
 
 def _role_from_options(starts_at: str) -> list[str]:
@@ -161,7 +168,13 @@ def _role_from_options(starts_at: str) -> list[str]:
         start_dt = datetime.strptime(starts_at, "%d.%m.%Y %H:%M")
     except ValueError:
         return []
-    return [f"{hour:02d}:00" for hour in range(start_dt.hour, 22)]
+    end_dt = start_dt.replace(hour=22, minute=30)
+    options: list[str] = []
+    current = start_dt.replace(second=0, microsecond=0)
+    while current <= end_dt:
+        options.append(current.strftime("%H:%M"))
+        current = current + timedelta(hours=1)
+    return options
 
 
 def _role_until_options(starts_at: str, available_from: str | None = None) -> list[str]:
@@ -183,7 +196,7 @@ async def _ask_role_from(callback: CallbackQuery, db: Database, game_id: int, ro
     options = _role_from_options(game["starts_at"])
     prompt = "С какого времени вы можете быть на игре?"
     if not options:
-        prompt = "Для этой игры нет доступных слотов времени до 21:00."
+        prompt = "Для этой игры нет доступных слотов времени до 22:30."
     try:
         await callback.message.edit_text(
             _game_card_text(db, game, game_id, prompt=prompt),
@@ -464,7 +477,7 @@ async def role_from_handler(callback: CallbackQuery, db: Database) -> None:
         return
     try:
         await callback.message.edit_text(
-            _game_card_text(db, game_with_counts, game_id, prompt="До какого времени вы можете быть на игре?"),
+            _game_card_text(db, game_with_counts, game_id, prompt="До какого времени вы можете быть на игре? (до 22:30)"),
             reply_markup=player_until_keyboard(game_id, until_options, role=role, from_token=from_token),
         )
     except TelegramBadRequest as exc:
