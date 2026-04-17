@@ -421,7 +421,7 @@ async def hourly_roster_show(message: Message, state: FSMContext, db: Database) 
     ]
     for idx, (start_at, end_at) in enumerate(intervals):
         lines.append(f"с {start_at} до {end_at}")
-        for role in ("host", "judge", "player"):
+        for role in ("host", "judge"):
             label = ROLE_LABELS[role]
             names = [
                 row["nickname"]
@@ -429,6 +429,18 @@ async def hourly_roster_show(message: Message, state: FSMContext, db: Database) 
                 if row["role"] == role and _is_available_on_interval(row, start_at, end_at, game_start)
             ]
             lines.append(f"• {label}: {', '.join(names) if names else 'пока никого'}")
+
+        players = [
+            row["nickname"]
+            for row in rows
+            if row["role"] == "player" and _is_available_on_interval(row, start_at, end_at, game_start)
+        ]
+        if players:
+            lines.append("• Игроки:")
+            for p_idx, nickname in enumerate(players, start=1):
+                lines.append(f"  {p_idx}. {nickname}")
+        else:
+            lines.append("• Игроки: пока никого")
         if idx < len(intervals) - 1:
             lines.append("____________")
 
