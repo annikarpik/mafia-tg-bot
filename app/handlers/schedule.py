@@ -485,15 +485,15 @@ async def role_until_handler(callback: CallbackQuery, db: Database) -> None:
         await callback.answer("Игра не найдена.", show_alert=True)
         return
 
-    options = _role_until_options(game["starts_at"], available_from)
-    available_until = f"{until_token[:2]}:{until_token[2:]}" if len(until_token) == 4 else None
-    if available_until not in options:
-        await callback.answer("Это время недоступно для выбранной игры.", show_alert=True)
-        return
     from_options = _role_from_options(game["starts_at"])
     available_from = f"{from_token[:2]}:{from_token[2:]}" if len(from_token) == 4 else None
     if available_from not in from_options:
         await callback.answer("Время начала недоступно для выбранной игры.", show_alert=True)
+        return
+    options = _role_until_options(game["starts_at"], available_from)
+    available_until = f"{until_token[:2]}:{until_token[2:]}" if len(until_token) == 4 else None
+    if available_until not in options:
+        await callback.answer("Это время недоступно для выбранной игры.", show_alert=True)
         return
 
     user = db.get_user_by_tg(tg_id)
