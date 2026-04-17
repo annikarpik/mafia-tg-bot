@@ -1,4 +1,10 @@
-from .inline import confirm_role_change_keyboard, games_keyboard, player_until_keyboard, roles_keyboard
+from .inline import (
+    confirm_role_change_keyboard,
+    games_keyboard,
+    player_until_keyboard,
+    role_from_keyboard,
+    roles_keyboard,
+)
 from .reply import (
     admin_menu_keyboard,
     affiliation_keyboard,
@@ -20,5 +26,6 @@ __all__ = [
     "games_keyboard",
     "roles_keyboard",
     "confirm_role_change_keyboard",
+    "role_from_keyboard",
     "player_until_keyboard",
 ]

@@ -85,6 +85,7 @@ class Database:
                 game_id BIGINT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
                 user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 role TEXT NOT NULL CHECK(role IN ('host', 'judge', 'player')),
+                available_from TEXT,
                 available_until TEXT,
                 created_at TEXT NOT NULL,
                 UNIQUE (game_id, user_id)
@@ -130,6 +131,8 @@ class Database:
             self.conn.execute("UPDATE games SET registration_until = starts_at WHERE registration_until = ''")
         if not self._column_exists("registrations", "available_until"):
             self.conn.execute("ALTER TABLE registrations ADD COLUMN available_until TEXT")
+        if not self._column_exists("registrations", "available_from"):
+            self.conn.execute("ALTER TABLE registrations ADD COLUMN available_from TEXT")
 
     # ------------------------------------------------------------------ users
     def user_exists(self, tg_id: int) -> bool:
@@ -359,7 +362,7 @@ class Database:
     def list_game_registrations(self, game_id: int) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
-            SELECT u.nickname, r.role, r.available_until
+            SELECT u.nickname, r.role, r.available_from, r.available_until
             FROM registrations r
             JOIN users u ON u.id = r.user_id
             WHERE r.game_id = %s
@@ -378,6 +381,7 @@ class Database:
             {
                 "nickname": row["nickname"],
                 "role": row["role"],
+                "available_from": row.get("available_from"),
                 "available_until": row["available_until"],
             }
             for row in rows
@@ -511,10 +515,11 @@ class Database:
             self.conn.execute("DELETE FROM reserves WHERE id = %s", (row["reserve_id"],))
             self.conn.execute(
                 """
-                INSERT INTO registrations (game_id, user_id, role, available_until, created_at)
-                VALUES (%s, %s, 'player', NULL, %s)
+                INSERT INTO registrations (game_id, user_id, role, available_from, available_until, created_at)
+                VALUES (%s, %s, 'player', NULL, NULL, %s)
                 ON CONFLICT (game_id, user_id) DO UPDATE
                     SET role = EXCLUDED.role,
+                        available_from = EXCLUDED.available_from,
                         available_until = EXCLUDED.available_until,
                         created_at = EXCLUDED.created_at
                 """,
@@ -534,6 +539,7 @@ class Database:
         game_id: int,
         user_id: int,
         role: str,
+        available_from: str | None = None,
         available_until: str | None = None,
     ) -> tuple[bool, str]:
         if role not in ROLE_LIMITS:
@@ -542,18 +548,21 @@ class Database:
         existing = self._user_registration(game_id, user_id)
         if existing and existing["role"] == role:
             previous_until = existing.get("available_until")
-            if previous_until == available_until:
+            previous_from = existing.get("available_from")
+            if previous_until == available_until and previous_from == available_from:
                 return False, "Вы уже записаны на эту игру с выбранным временем."
             now = datetime.utcnow().isoformat()
             self.conn.execute(
                 """
                 UPDATE registrations
-                SET available_until = %s, created_at = %s
+                SET available_from = %s, available_until = %s, created_at = %s
                 WHERE id = %s
                 """,
-                (available_until, now, existing["id"]),
+                (available_from, available_until, now, existing["id"]),
             )
             if available_until:
+                if available_from:
+                    return True, f"Обновили время: вы можете быть с {available_from} до {available_until}."
                 return True, f"Обновили время: вы можете быть до {available_until}."
             return True, "Обновили запись: вы без ограничения по времени."
 
@@ -566,20 +575,22 @@ class Database:
             self.conn.execute(
                 """
                 UPDATE registrations
-                SET role = %s, available_until = %s, created_at = %s
+                SET role = %s, available_from = %s, available_until = %s, created_at = %s
                 WHERE id = %s
                 """,
-                (role, available_until, now, existing["id"]),
+                (role, available_from, available_until, now, existing["id"]),
             )
         else:
             self.conn.execute(
                 """
-                INSERT INTO registrations (game_id, user_id, role, available_until, created_at)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO registrations (game_id, user_id, role, available_from, available_until, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
-                (game_id, user_id, role, available_until, now),
+                (game_id, user_id, role, available_from, available_until, now),
             )
         role_label = ROLE_LABELS[role]
         if available_until:
+            if available_from:
+                return True, f"Вы успешно записались на игру в роли: {role_label} (с {available_from} до {available_until})."
             return True, f"Вы успешно записались на игру в роли: {role_label} (до {available_until})."
         return True, f"Вы успешно записались на игру в роли: {role_label} (без ограничения по времени)."

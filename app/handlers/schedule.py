@@ -9,6 +9,7 @@ from app.keyboards.inline import (
     confirm_role_change_keyboard,
     games_keyboard,
     player_until_keyboard,
+    role_from_keyboard,
     roles_keyboard,
 )
 from app.utils import ensure_superadmin
@@ -147,24 +148,38 @@ def _player_until_options(starts_at: str) -> list[str]:
     return [f"{hour:02d}:00" for hour in range(start_hour + 1, 23)]
 
 
-async def _ask_role_until(callback: CallbackQuery, db: Database, game_id: int, role: str) -> None:
+def _role_from_options(starts_at: str) -> list[str]:
+    try:
+        start_dt = datetime.strptime(starts_at, "%d.%m.%Y %H:%M")
+    except ValueError:
+        return []
+    return [f"{hour:02d}:00" for hour in range(start_dt.hour, 22)]
+
+
+def _role_until_options(starts_at: str, available_from: str | None = None) -> list[str]:
+    base = _player_until_options(starts_at)
+    if not available_from:
+        return base
+    try:
+        from_hour = int(available_from.split(":")[0])
+    except (ValueError, IndexError):
+        return base
+    return [opt for opt in base if int(opt.split(":")[0]) > from_hour]
+
+
+async def _ask_role_from(callback: CallbackQuery, db: Database, game_id: int, role: str) -> None:
     game = db.get_game_with_counts(game_id)
     if not game:
         await callback.answer("Игра не найдена.", show_alert=True)
         return
-    options = _player_until_options(game["starts_at"])
-    role_prompt = {
-        "player": "играть",
-        "judge": "судить",
-        "host": "быть ведущим",
-    }.get(role, "участвовать")
-    prompt = f"До какого времени вы можете {role_prompt}?"
+    options = _role_from_options(game["starts_at"])
+    prompt = "С какого времени вы можете быть на игре?"
     if not options:
-        prompt = "Для этой игры нет доступных слотов времени до 22:00."
+        prompt = "Для этой игры нет доступных слотов времени до 21:00."
     try:
         await callback.message.edit_text(
             _game_card_text(db, game, game_id, prompt=prompt),
-            reply_markup=player_until_keyboard(game_id, options, role=role),
+            reply_markup=role_from_keyboard(game_id, options, role=role),
         )
     except TelegramBadRequest as exc:
         if "message is not modified" not in str(exc).lower():
@@ -244,6 +259,15 @@ async def my_games_handler(message: Message, db: Database, config: Config) -> No
     await message.answer("\n".join(lines))
 
 
+@router.message(F.text.in_({"Статистика", "📊 Статистика"}))
+async def statistics_stub_handler(message: Message) -> None:
+    await message.answer(
+        "📊 Статистика\n"
+        "Раздел в разработке.\n"
+        "Скоро здесь появятся данные из внешней базы."
+    )
+
+
 @router.callback_query(F.data.startswith("game:"))
 async def game_pick_handler(callback: CallbackQuery, db: Database) -> None:
     tg_id = callback.from_user.id
@@ -320,7 +344,7 @@ async def role_pick_handler(callback: CallbackQuery, db: Database) -> None:
             )
             await callback.answer()
             return
-        await _ask_role_until(callback, db, game_id, role)
+        await _ask_role_from(callback, db, game_id, role)
         await callback.answer()
         return
 
@@ -372,7 +396,7 @@ async def role_confirm_handler(callback: CallbackQuery, db: Database) -> None:
         return
 
     if role in {"player", "judge", "host"}:
-        await _ask_role_until(callback, db, game_id, role)
+        await _ask_role_from(callback, db, game_id, role)
         await callback.answer()
         return
 
@@ -392,6 +416,55 @@ async def role_back_handler(callback: CallbackQuery, db: Database) -> None:
     await callback.answer("Оставили прежнюю роль")
 
 
+@router.callback_query(F.data.startswith("refresh:"))
+async def refresh_game_handler(callback: CallbackQuery, db: Database) -> None:
+    _, game_id_raw = callback.data.split(":")
+    game_id = int(game_id_raw)
+    await _refresh_game_card(callback, db, game_id)
+    await callback.answer("Состав обновлён")
+
+
+@router.callback_query(F.data.startswith("role_from:"))
+async def role_from_handler(callback: CallbackQuery, db: Database) -> None:
+    tg_id = callback.from_user.id
+    if not db.user_exists(tg_id):
+        await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
+        return
+
+    _, game_id_raw, role, from_token = callback.data.split(":")
+    game_id = int(game_id_raw)
+    if role not in {"player", "judge", "host"}:
+        await callback.answer("Неизвестная роль.", show_alert=True)
+        return
+    if not db.is_game_open(game_id):
+        await callback.answer("Регистрация на эту игру уже закрыта.", show_alert=True)
+        return
+    game = db.get_game(game_id)
+    if not game:
+        await callback.answer("Игра не найдена.", show_alert=True)
+        return
+    from_options = _role_from_options(game["starts_at"])
+    available_from = f"{from_token[:2]}:{from_token[2:]}" if len(from_token) == 4 else None
+    if available_from not in from_options:
+        await callback.answer("Это время недоступно для выбранной игры.", show_alert=True)
+        return
+
+    until_options = _role_until_options(game["starts_at"], available_from)
+    game_with_counts = db.get_game_with_counts(game_id)
+    if not game_with_counts:
+        await callback.answer("Игра не найдена.", show_alert=True)
+        return
+    try:
+        await callback.message.edit_text(
+            _game_card_text(db, game_with_counts, game_id, prompt="До какого времени вы можете быть на игре?"),
+            reply_markup=player_until_keyboard(game_id, until_options, role=role, from_token=from_token),
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("role_until:"))
 async def role_until_handler(callback: CallbackQuery, db: Database) -> None:
     tg_id = callback.from_user.id
@@ -399,7 +472,7 @@ async def role_until_handler(callback: CallbackQuery, db: Database) -> None:
         await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
         return
 
-    _, game_id_raw, role, until_token = callback.data.split(":")
+    _, game_id_raw, role, from_token, until_token = callback.data.split(":")
     game_id = int(game_id_raw)
     if role not in {"player", "judge", "host"}:
         await callback.answer("Неизвестная роль.", show_alert=True)
@@ -412,10 +485,15 @@ async def role_until_handler(callback: CallbackQuery, db: Database) -> None:
         await callback.answer("Игра не найдена.", show_alert=True)
         return
 
-    options = _player_until_options(game["starts_at"])
+    options = _role_until_options(game["starts_at"], available_from)
     available_until = f"{until_token[:2]}:{until_token[2:]}" if len(until_token) == 4 else None
     if available_until not in options:
         await callback.answer("Это время недоступно для выбранной игры.", show_alert=True)
+        return
+    from_options = _role_from_options(game["starts_at"])
+    available_from = f"{from_token[:2]}:{from_token[2:]}" if len(from_token) == 4 else None
+    if available_from not in from_options:
+        await callback.answer("Время начала недоступно для выбранной игры.", show_alert=True)
         return
 
     user = db.get_user_by_tg(tg_id)
@@ -428,6 +506,7 @@ async def role_until_handler(callback: CallbackQuery, db: Database) -> None:
         game_id=game_id,
         user_id=int(user["id"]),
         role=role,
+        available_from=available_from,
         available_until=available_until,
     )
     await _refresh_game_card(callback, db, game_id)

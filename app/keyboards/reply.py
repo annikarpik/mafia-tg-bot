@@ -3,7 +3,7 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 def main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [[KeyboardButton(text="🎭 Расписание игр"), KeyboardButton(text="📋 Список игр")]]
-    rows.append([KeyboardButton(text="📝 Редактировать профиль")])
+    rows.append([KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📝 Редактировать профиль")])
     if is_admin:
         rows.append([KeyboardButton(text="🛠️ Админ-меню")])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
