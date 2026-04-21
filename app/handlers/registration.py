@@ -7,6 +7,7 @@ from app.db.database import Database
 from app.keyboards.reply import (
     affiliation_keyboard,
     main_keyboard,
+    preferred_roles_keyboard,
     request_contact_keyboard,
     salutation_keyboard,
 )
@@ -94,6 +95,36 @@ async def affiliation_handler(message: Message, state: FSMContext) -> None:
         return
 
     await state.update_data(affiliation=affiliation)
+    await state.set_state(RegistrationStates.waiting_for_preferred_roles)
+    await message.answer(
+        "За какие роли хотите играть?",
+        reply_markup=preferred_roles_keyboard(),
+    )
+
+
+@router.message(RegistrationStates.waiting_for_preferred_roles)
+async def preferred_roles_handler(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    roles_map = {
+        "Игрок": (True, False),
+        "🎭 Игрок": (True, False),
+        "Ведущий/судья": (False, True),
+        "🎙️ Ведущий/судья": (False, True),
+        "Оба": (True, True),
+        "🎭+🎙️ Оба": (True, True),
+    }
+    selected = roles_map.get(text)
+    if not selected:
+        await message.answer(
+            "Выберите вариант кнопками:\n"
+            "• Игрок\n"
+            "• Ведущий/судья\n"
+            "• Оба"
+        )
+        return
+
+    can_play, can_staff = selected
+    await state.update_data(can_play=can_play, can_staff=can_staff)
     await state.set_state(RegistrationStates.waiting_for_nickname)
     await message.answer("Супер! Теперь придумайте и введите свой уникальный никнейм ✍️")
 
@@ -117,6 +148,8 @@ async def nickname_handler(
     salutation = data.get("salutation")
     full_name = data.get("full_name")
     affiliation = data.get("affiliation")
+    can_play = bool(data.get("can_play"))
+    can_staff = bool(data.get("can_staff"))
     if not phone:
         await message.answer("Что-то пошло не так. Начните заново: /start")
         await state.clear()
@@ -133,6 +166,10 @@ async def nickname_handler(
         await message.answer("Статус прохода не выбран. Начните заново: /start")
         await state.clear()
         return
+    if not (can_play or can_staff):
+        await message.answer("Не выбраны роли для игр. Начните заново: /start")
+        await state.clear()
+        return
 
     tg_id = message.from_user.id
     db.create_user(
@@ -142,6 +179,8 @@ async def nickname_handler(
         salutation=salutation,
         full_name=full_name,
         affiliation=affiliation,
+        can_play=can_play,
+        can_staff=can_staff,
         username=message.from_user.username,
     )
     ensure_superadmin(tg_id, db, config)

@@ -10,6 +10,12 @@ AFFILIATION_LABELS: dict[str, str] = {
     "outside_need_pass": "Вне МГУ, нужен пропуск",
 }
 
+GAME_TYPE_LABELS: dict[str, str] = {
+    "tournament": "Турнир",
+    "funky": "Фанки",
+    "training": "Обучающие",
+}
+
 ROLE_LIMITS: dict[str, int] = {
     "host": 1,
     "judge": 3,
@@ -44,6 +50,8 @@ class Database:
                 salutation TEXT NOT NULL DEFAULT 'господин',
                 full_name TEXT,
                 affiliation TEXT NOT NULL DEFAULT 'vmk',
+                can_play BOOLEAN NOT NULL DEFAULT TRUE,
+                can_staff BOOLEAN NOT NULL DEFAULT TRUE,
                 nickname TEXT UNIQUE NOT NULL,
                 created_at TEXT NOT NULL
             );
@@ -73,6 +81,7 @@ class Database:
                 id BIGSERIAL PRIMARY KEY,
                 starts_at TEXT NOT NULL,
                 location TEXT NOT NULL,
+                game_type TEXT NOT NULL DEFAULT 'tournament',
                 registration_until TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
@@ -126,6 +135,12 @@ class Database:
             self.conn.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
         if not self._column_exists("users", "affiliation"):
             self.conn.execute("ALTER TABLE users ADD COLUMN affiliation TEXT NOT NULL DEFAULT 'vmk'")
+        if not self._column_exists("users", "can_play"):
+            self.conn.execute("ALTER TABLE users ADD COLUMN can_play BOOLEAN NOT NULL DEFAULT TRUE")
+        if not self._column_exists("users", "can_staff"):
+            self.conn.execute("ALTER TABLE users ADD COLUMN can_staff BOOLEAN NOT NULL DEFAULT TRUE")
+        if not self._column_exists("games", "game_type"):
+            self.conn.execute("ALTER TABLE games ADD COLUMN game_type TEXT NOT NULL DEFAULT 'tournament'")
         if not self._column_exists("games", "registration_until"):
             self.conn.execute("ALTER TABLE games ADD COLUMN registration_until TEXT NOT NULL DEFAULT ''")
             self.conn.execute("UPDATE games SET registration_until = starts_at WHERE registration_until = ''")
@@ -184,16 +199,20 @@ class Database:
         salutation: str,
         full_name: str,
         affiliation: str,
+        can_play: bool,
+        can_staff: bool,
         username: str | None = None,
     ) -> int:
         now = datetime.utcnow().isoformat()
         row = self.conn.execute(
             """
-            INSERT INTO users (tg_id, phone, username, salutation, full_name, affiliation, nickname, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO users (
+                tg_id, phone, username, salutation, full_name, affiliation, can_play, can_staff, nickname, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (tg_id, phone, username, salutation, full_name, affiliation, nickname, now),
+            (tg_id, phone, username, salutation, full_name, affiliation, can_play, can_staff, nickname, now),
         ).fetchone()
         return int(row["id"])
 
@@ -249,15 +268,15 @@ class Database:
         return cur.rowcount > 0
 
     # ------------------------------------------------------------------ games
-    def create_game(self, starts_at: str, location: str, registration_until: str) -> int:
+    def create_game(self, starts_at: str, location: str, registration_until: str, game_type: str) -> int:
         now = datetime.utcnow().isoformat()
         row = self.conn.execute(
             """
-            INSERT INTO games (starts_at, location, registration_until, created_at)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO games (starts_at, location, game_type, registration_until, created_at)
+            VALUES (%s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (starts_at, location, registration_until, now),
+            (starts_at, location, game_type, registration_until, now),
         ).fetchone()
         return int(row["id"])
 
@@ -272,6 +291,7 @@ class Database:
                 g.id,
                 g.starts_at,
                 g.location,
+                g.game_type,
                 g.registration_until,
                 SUM(CASE WHEN r.role = 'host' THEN 1 ELSE 0 END) AS hosts,
                 SUM(CASE WHEN r.role = 'judge' THEN 1 ELSE 0 END) AS judges,
@@ -283,7 +303,7 @@ class Database:
                 ) AS reserves
             FROM games g
             LEFT JOIN registrations r ON r.game_id = g.id
-            GROUP BY g.id, g.starts_at, g.location, g.registration_until
+            GROUP BY g.id, g.starts_at, g.location, g.game_type, g.registration_until
             ORDER BY g.starts_at
             """
         ).fetchall()
@@ -292,10 +312,12 @@ class Database:
                 "id": int(r["id"]),
                 "starts_at": r["starts_at"],
                 "location": r["location"],
+                "game_type": r["game_type"],
                 "registration_until": r["registration_until"],
                 "hosts": int(r["hosts"] or 0),
                 "judges": int(r["judges"] or 0),
                 "players": int(r["players"] or 0),
+                "staff": int(r["hosts"] or 0) + int(r["judges"] or 0),
                 "reserves": int(r["reserves"] or 0),
             }
             for r in rows
@@ -315,6 +337,34 @@ class Database:
             until = self._parse_datetime(game["registration_until"])
             if until is None or until >= now:
                 games.append(game)
+        return games
+
+    def list_open_days(self, game_type: str) -> list[str]:
+        days: set[str] = set()
+        for game in self.list_open_games():
+            if game.get("game_type") != game_type:
+                continue
+            dt = self._parse_datetime(game["starts_at"])
+            if not dt:
+                continue
+            days.add(dt.strftime("%d.%m.%Y"))
+        return sorted(days, key=lambda raw: datetime.strptime(raw, "%d.%m.%Y"))
+
+    def list_open_games_by_type_and_day(self, game_type: str, day: str) -> list[dict[str, Any]]:
+        day_dt = datetime.strptime(day, "%d.%m.%Y")
+        games: list[dict[str, Any]] = []
+        for game in self.list_open_games():
+            if game.get("game_type") != game_type:
+                continue
+            starts_at = self._parse_datetime(game["starts_at"])
+            if not starts_at:
+                continue
+            if starts_at.date() != day_dt.date():
+                continue
+            game_copy = dict(game)
+            game_copy["time"] = starts_at.strftime("%H:%M")
+            games.append(game_copy)
+        games.sort(key=lambda row: row["starts_at"])
         return games
 
     def is_game_open(self, game_id: int) -> bool:
@@ -421,6 +471,19 @@ class Database:
         ).fetchall()
         rows = [*rows_main, *rows_reserve]
         rows.sort(key=lambda row: row["starts_at"])
+        return [dict(row) for row in rows]
+
+    def list_user_registrations(self, user_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT g.id, g.starts_at, g.location, g.game_type, r.role
+            FROM registrations r
+            JOIN games g ON g.id = r.game_id
+            WHERE r.user_id = %s
+            ORDER BY g.starts_at
+            """,
+            (user_id,),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def list_game_user_tg_ids(self, game_id: int) -> list[int]:
@@ -594,3 +657,12 @@ class Database:
                 return True, f"Вы успешно записались на игру в роли: {role_label} (с {available_from} до {available_until})."
             return True, f"Вы успешно записались на игру в роли: {role_label} (до {available_until})."
         return True, f"Вы успешно записались на игру в роли: {role_label} (без ограничения по времени)."
+
+    def register_user_for_kind(self, game_id: int, user_id: int, role_kind: str) -> tuple[bool, str]:
+        if role_kind == "player":
+            return self.register_user(game_id=game_id, user_id=user_id, role="player")
+        if role_kind != "staff":
+            return False, "Неизвестный тип роли."
+        if self._role_count(game_id, "host") < ROLE_LIMITS["host"]:
+            return self.register_user(game_id=game_id, user_id=user_id, role="host")
+        return self.register_user(game_id=game_id, user_id=user_id, role="judge")

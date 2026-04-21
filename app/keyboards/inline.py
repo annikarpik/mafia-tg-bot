@@ -1,80 +1,60 @@
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.db.database import ROLE_LABELS, ROLE_LIMITS
+GAME_TYPE_LABELS = {
+    "tournament": "🏆 Турнир",
+    "funky": "🎉 Фанки",
+    "training": "📚 Обучающие",
+}
 
-_ROLE_COUNT_KEY = {"host": "hosts", "judge": "judges", "player": "players"}
+
+def game_types_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for game_type, label in GAME_TYPE_LABELS.items():
+        kb.button(text=label, callback_data=f"reg_type:{game_type}")
+    kb.adjust(1)
+    return kb.as_markup()
 
 
-def games_keyboard(games: list[dict]) -> InlineKeyboardMarkup:
+def registration_role_keyboard(can_play: bool, can_staff: bool, game_type: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if can_play:
+        kb.button(text="🎭 Игрок", callback_data=f"reg_role:{game_type}:player")
+    if can_staff:
+        kb.button(text="🎙️ Ведущий/судья", callback_data=f"reg_role:{game_type}:staff")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def game_days_keyboard(game_type: str, role_kind: str, days: list[str]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for day in days:
+        token = day.replace(".", "")
+        kb.button(text=day, callback_data=f"reg_day:{game_type}:{role_kind}:{token}")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def game_slots_keyboard(game_type: str, role_kind: str, games: list[dict]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for game in games:
+        current = int(game.get("players", 0)) if role_kind == "player" else int(game.get("staff", 0))
+        limit = 10 if role_kind == "player" else 4
         kb.button(
-            text=f"🎲 #{game['id']}  {game['starts_at']}  |  {game['location']}",
-            callback_data=f"game:{game['id']}",
+            text=f"Игра #{game['id']} {game['time']} ({current}/{limit})",
+            callback_data=f"reg_game:{game_type}:{role_kind}:{game['id']}",
         )
     kb.adjust(1)
     return kb.as_markup()
 
 
-def roles_keyboard(game_id: int, game: dict, can_cancel: bool) -> InlineKeyboardMarkup:
+def user_registrations_keyboard(items: list[dict]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for role, label in ROLE_LABELS.items():
-        taken = game[_ROLE_COUNT_KEY[role]]
-        limit = ROLE_LIMITS[role]
+    for item in items:
+        role_label = "Игрок" if item.get("role") == "player" else "Ведущий/судья"
         kb.button(
-            text=f"🎭 {label}  ({taken}/{limit})",
-            callback_data=f"role:{game_id}:{role}",
+            text=f"❌ #{item['id']} {item['starts_at']} ({role_label})",
+            callback_data=f"myreg_cancel:{item['id']}",
         )
-    kb.button(
-        text=f"👀 Наблюдатель/Запас ({game.get('reserves', 0)})",
-        callback_data=f"reserve:{game_id}",
-    )
-    kb.button(text="🔄 Обновить", callback_data=f"refresh:{game_id}")
-    if can_cancel:
-        kb.button(text="❌ Отменить регистрацию", callback_data=f"unregister:{game_id}")
-    kb.button(text="↩️ Отмена", callback_data="role_cancel")
-    kb.adjust(1, 1, 1, 1, 1, 1, 1)
-    return kb.as_markup()
-
-
-def confirm_role_change_keyboard(game_id: int, new_role: str) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Да, поменять", callback_data=f"role_confirm:{game_id}:{new_role}")
-    kb.button(text="↩️ Нет, оставить как есть", callback_data=f"role_back:{game_id}")
     kb.adjust(1)
-    return kb.as_markup()
-
-
-def role_from_keyboard(game_id: int, options: list[str], role: str) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    for option in options:
-        token = option.replace(":", "")
-        kb.button(text=f"🕒 С {option}", callback_data=f"role_from:{game_id}:{role}:{token}")
-    kb.button(text="↩️ Назад", callback_data=f"role_back:{game_id}")
-    if options:
-        kb.adjust(2, 2, 2, 1)
-    else:
-        kb.adjust(1)
-    return kb.as_markup()
-
-
-def player_until_keyboard(
-    game_id: int,
-    options: list[str],
-    role: str = "player",
-    from_token: str = "none",
-) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    for option in options:
-        token = option.replace(":", "")
-        kb.button(
-            text=f"🕒 До {option}",
-            callback_data=f"role_until:{game_id}:{role}:{from_token}:{token}",
-        )
-    kb.button(text="↩️ Назад", callback_data=f"role_back:{game_id}")
-    if options:
-        kb.adjust(2, 2, 2, 1)
-    else:
-        kb.adjust(1)
     return kb.as_markup()

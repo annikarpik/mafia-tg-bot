@@ -2,7 +2,7 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 
 def main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(text="🎭 Расписание игр"), KeyboardButton(text="📋 Список игр")]]
+    rows = [[KeyboardButton(text="📝 Регистрация на игры"), KeyboardButton(text="📋 Ваши регистрации")]]
     rows.append([KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📝 Редактировать профиль")])
     if is_admin:
         rows.append([KeyboardButton(text="🛠️ Админ-меню")])
@@ -32,6 +32,28 @@ def affiliation_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="🎓 С ВМК"), KeyboardButton(text="🏛️ Из МГУ, пропуск не нужен")],
             [KeyboardButton(text="🪪 Вне МГУ, нужен пропуск"), KeyboardButton(text="↩️ Назад")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def preferred_roles_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎭 Игрок"), KeyboardButton(text="🎙️ Ведущий/судья")],
+            [KeyboardButton(text="🎭+🎙️ Оба"), KeyboardButton(text="↩️ Назад")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def game_type_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🏆 Турнир"), KeyboardButton(text="🎉 Фанки")],
+            [KeyboardButton(text="📚 Обучающие"), KeyboardButton(text="↩️ Назад")],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,

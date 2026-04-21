@@ -4,8 +4,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from app.config import Config
-from app.db.database import Database, ROLE_LABELS
-from app.keyboards.reply import admin_menu_keyboard, game_edit_field_keyboard
+from app.db.database import Database, GAME_TYPE_LABELS, ROLE_LABELS
+from app.keyboards.reply import (
+    admin_menu_keyboard,
+    game_edit_field_keyboard,
+    game_type_keyboard,
+)
 from app.states import AdminStates
 from app.utils import ensure_superadmin, normalize_phone, parse_game_datetime
 
@@ -95,8 +99,9 @@ def _games_short_list(db: Database) -> str:
         return "Игр нет."
     lines = ["Текущие игры:"]
     for game in games:
+        game_type = GAME_TYPE_LABELS.get(game.get("game_type", ""), game.get("game_type", "-"))
         lines.append(
-            f"• #{game['id']} | {game['starts_at']} | {game['location']} | рег. до {game['registration_until']}"
+            f"• #{game['id']} | {game['starts_at']} | {game['location']} | {game_type} | рег. до {game['registration_until']}"
         )
     return "\n".join(lines)
 
@@ -107,6 +112,43 @@ def _to_minutes(raw: str) -> int | None:
         return int(hh) * 60 + int(mm)
     except (ValueError, TypeError):
         return None
+
+
+def _parse_day(raw: str) -> str | None:
+    try:
+        dt = datetime.strptime(raw.strip(), "%d.%m.%Y")
+        return dt.strftime("%d.%m.%Y")
+    except ValueError:
+        return None
+
+
+def _parse_time_range(raw: str) -> tuple[str, str] | None:
+    text = raw.replace("—", "-").replace("–", "-").strip()
+    if "-" not in text:
+        return None
+    start_raw, end_raw = [part.strip() for part in text.split("-", maxsplit=1)]
+    start_min = _to_minutes(start_raw)
+    end_min = _to_minutes(end_raw)
+    if start_min is None or end_min is None or end_min <= start_min:
+        return None
+    if (end_min - start_min) < 60:
+        return None
+    if start_min % 60 != 0 or end_min % 60 != 0:
+        return None
+    return (f"{start_min // 60:02d}:{start_min % 60:02d}", f"{end_min // 60:02d}:{end_min % 60:02d}")
+
+
+def _build_hourly_starts(day: str, time_from: str, time_to: str) -> list[str]:
+    start_min = _to_minutes(time_from)
+    end_min = _to_minutes(time_to)
+    if start_min is None or end_min is None:
+        return []
+    starts: list[str] = []
+    current = start_min
+    while current < end_min:
+        starts.append(f"{day} {current // 60:02d}:{current % 60:02d}")
+        current += 60
+    return starts
 
 
 def _time_from_starts_at(starts_at: str) -> str | None:
@@ -269,58 +311,48 @@ async def create_game_start(message: Message, state: FSMContext, db: Database) -
         await message.answer("У вас нет прав администратора.")
         return
 
-    await state.set_state(AdminStates.waiting_for_game_datetime)
-    await message.answer(
-        "Введите дату и время игры в формате ДД.ММ.ГГГГ ЧЧ:ММ\n"
-        "Пример: 21.06.2026 19:30"
-    )
+    await state.set_state(AdminStates.waiting_for_game_type)
+    await message.answer("Выберите формат игр:", reply_markup=game_type_keyboard())
 
 
-@router.message(AdminStates.waiting_for_game_datetime, ~F.text.in_(BACK_BUTTONS))
-async def create_game_datetime(message: Message, state: FSMContext, db: Database) -> None:
+@router.message(AdminStates.waiting_for_game_type, ~F.text.in_(BACK_BUTTONS))
+async def create_game_type(message: Message, state: FSMContext, db: Database) -> None:
     if not db.is_admin(message.from_user.id):
         await message.answer("У вас нет прав администратора.")
         await state.clear()
         return
 
-    starts_at = parse_game_datetime(message.text or "")
-    if not starts_at:
-        await message.answer(
-            "Неверный формат даты. Попробуйте снова.\nПример: 21.06.2026 19:30"
-        )
+    type_map = {
+        "🏆 Турнир": "tournament",
+        "Турнир": "tournament",
+        "🎉 Фанки": "funky",
+        "Фанки": "funky",
+        "📚 Обучающие": "training",
+        "Обучающие": "training",
+    }
+    game_type = type_map.get((message.text or "").strip())
+    if not game_type:
+        await message.answer("Выберите формат кнопкой: Турнир, Фанки или Обучающие.")
         return
 
-    await state.update_data(starts_at=starts_at)
-    await state.set_state(AdminStates.waiting_for_game_registration_until)
-    await message.answer(
-        "Введите время окончания регистрации на игру в формате ДД.ММ.ГГГГ ЧЧ:ММ\n"
-        "Пример: 21.06.2026 16:30"
-    )
+    await state.update_data(game_type=game_type)
+    await state.set_state(AdminStates.waiting_for_game_day)
+    await message.answer("Введите день игр в формате ДД.ММ.ГГГГ.\nПример: 21.06.2026")
 
 
-@router.message(AdminStates.waiting_for_game_registration_until, ~F.text.in_(BACK_BUTTONS))
-async def create_game_registration_until(message: Message, state: FSMContext, db: Database) -> None:
+@router.message(AdminStates.waiting_for_game_day, ~F.text.in_(BACK_BUTTONS))
+async def create_game_day(message: Message, state: FSMContext, db: Database) -> None:
     if not db.is_admin(message.from_user.id):
         await message.answer("У вас нет прав администратора.")
         await state.clear()
         return
 
-    registration_until = parse_game_datetime(message.text or "")
-    if not registration_until:
-        await message.answer(
-            "Неверный формат даты. Попробуйте снова.\nПример: 21.06.2026 16:30"
-        )
+    day = _parse_day(message.text or "")
+    if not day:
+        await message.answer("Неверный формат дня. Пример: 21.06.2026")
         return
 
-    data = await state.get_data()
-    starts_at = data.get("starts_at")
-    starts_dt = _to_dt(starts_at) if starts_at else None
-    reg_dt = _to_dt(registration_until)
-    if starts_dt and reg_dt and reg_dt > starts_dt:
-        await message.answer("Окончание регистрации должно быть не позже начала игры.")
-        return
-
-    await state.update_data(registration_until=registration_until)
+    await state.update_data(game_day=day)
     await state.set_state(AdminStates.waiting_for_game_location)
     await message.answer("Введите место проведения игры.")
 
@@ -337,30 +369,62 @@ async def create_game_location(message: Message, state: FSMContext, db: Database
         await message.answer("Название места должно содержать не менее 3 символов.")
         return
 
-    data = await state.get_data()
-    starts_at = data.get("starts_at")
-    registration_until = data.get("registration_until")
-    if not starts_at:
-        await message.answer("Дата не найдена. Начните создание игры заново.")
-        await state.clear()
-        return
-    if not registration_until:
-        await message.answer("Время окончания регистрации не найдено. Начните заново.")
+    await state.update_data(location=location)
+    await state.set_state(AdminStates.waiting_for_game_time_range)
+    await message.answer(
+        "Введите временной диапазон в формате ЧЧ:ММ-ЧЧ:ММ.\n"
+        "Пример: 18:00-22:00\n"
+        "Каждая игра длится 1 час."
+    )
+
+
+@router.message(AdminStates.waiting_for_game_time_range, ~F.text.in_(BACK_BUTTONS))
+async def create_game_time_range(message: Message, state: FSMContext, db: Database) -> None:
+    if not db.is_admin(message.from_user.id):
+        await message.answer("У вас нет прав администратора.")
         await state.clear()
         return
 
-    game_id = db.create_game(
-        starts_at=starts_at,
-        location=location,
-        registration_until=registration_until,
-    )
+    parsed = _parse_time_range(message.text or "")
+    if not parsed:
+        await message.answer(
+            "Некорректный диапазон. Используйте формат ЧЧ:ММ-ЧЧ:ММ, "
+            "границы по часу и минимум 1 час."
+        )
+        return
+    time_from, time_to = parsed
+    data = await state.get_data()
+    game_type = data.get("game_type")
+    game_day = data.get("game_day")
+    location = data.get("location")
+    if game_type not in GAME_TYPE_LABELS or not game_day or not location:
+        await message.answer("Данные создания игры потеряны. Начните заново.")
+        await state.clear()
+        return
+
+    starts = _build_hourly_starts(day=game_day, time_from=time_from, time_to=time_to)
+    if not starts:
+        await message.answer("Не удалось собрать слоты по заданному диапазону.")
+        return
+
+    created_ids: list[int] = []
+    for starts_at in starts:
+        created_ids.append(
+            db.create_game(
+                starts_at=starts_at,
+                location=location,
+                registration_until=starts_at,
+                game_type=game_type,
+            )
+        )
     await state.clear()
     await message.answer(
-        f"Игра создана! ✅\n"
-        f"Номер: #{game_id}\n"
-        f"Когда: {starts_at}\n"
-        f"Где: {location}\n"
-        f"Регистрация до: {registration_until}"
+        "Игры созданы ✅\n"
+        f"Формат: {GAME_TYPE_LABELS[game_type]}\n"
+        f"День: {game_day}\n"
+        f"Место: {location}\n"
+        f"Диапазон: {time_from}-{time_to}\n"
+        f"Создано игр: {len(created_ids)} (ID: {', '.join(map(str, created_ids))})"
     )
 
 

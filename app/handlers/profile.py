@@ -16,11 +16,18 @@ router = Router(name="profile")
 
 def _profile_text(user: dict) -> str:
     affiliation = AFFILIATION_LABELS.get(user.get("affiliation", ""), "-")
+    role_parts: list[str] = []
+    if user.get("can_play"):
+        role_parts.append("игрок")
+    if user.get("can_staff"):
+        role_parts.append("ведущий/судья")
+    preferred_roles = ", ".join(role_parts) if role_parts else "-"
     return (
         "Ваш профиль:\n"
         f"• Обращение: {user.get('salutation', '-')}\n"
         f"• ФИО: {user.get('full_name') or '-'}\n"
         f"• Статус: {affiliation}\n"
+        f"• Предпочтение по ролям: {preferred_roles}\n"
         f"• Никнейм: {user.get('nickname')}\n"
         f"• Телефон: {user.get('phone')}"
     )
