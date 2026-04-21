@@ -151,37 +151,10 @@ def _build_hourly_starts(day: str, time_from: str, time_to: str) -> list[str]:
     return starts
 
 
-def _time_from_starts_at(starts_at: str) -> str | None:
-    dt = _to_dt(starts_at)
-    if not dt:
-        return None
-    return dt.strftime("%H:%M")
-
-
-def _hourly_intervals(start_time: str) -> list[tuple[str, str]]:
-    start_min = _to_minutes(start_time)
-    if start_min is None:
-        return []
-    end_day = 22 * 60
-    intervals: list[tuple[str, str]] = []
-    current = start_min
-    while current < end_day:
-        nxt = min(current + 60, end_day)
-        intervals.append((f"{current // 60:02d}:{current % 60:02d}", f"{nxt // 60:02d}:{nxt % 60:02d}"))
-        current = nxt
-    return intervals
-
-
-def _is_available_on_interval(row: dict, interval_start: str, interval_end: str, game_start: str) -> bool:
-    from_raw = row.get("available_from") or game_start
-    until_raw = row.get("available_until") or "22:00"
-    from_min = _to_minutes(from_raw)
-    until_min = _to_minutes(until_raw)
-    start_min = _to_minutes(interval_start)
-    end_min = _to_minutes(interval_end)
-    if None in {from_min, until_min, start_min, end_min}:
-        return False
-    return from_min <= start_min and until_min >= end_min
+def _username_suffix(username: str | None) -> str:
+    if not username:
+        return "(без @username)"
+    return f"(@{username})"
 
 
 @router.message(F.text.in_({"Админ-меню", "🛠️ Админ-меню"}))
@@ -417,7 +390,7 @@ async def create_game_time_range(message: Message, state: FSMContext, db: Databa
                 game_type=game_type,
             )
         )
-    await state.clear()
+    await state.set_state(AdminStates.waiting_for_game_type)
     await message.answer(
         "Игры созданы ✅\n"
         f"Формат: {GAME_TYPE_LABELS[game_type]}\n"
@@ -425,6 +398,10 @@ async def create_game_time_range(message: Message, state: FSMContext, db: Databa
         f"Место: {location}\n"
         f"Диапазон: {time_from}-{time_to}\n"
         f"Создано игр: {len(created_ids)} (ID: {', '.join(map(str, created_ids))})"
+    )
+    await message.answer(
+        "Можно сразу создать следующий игровой день.\nВыберите формат игр:",
+        reply_markup=game_type_keyboard(),
     )
 
 
@@ -437,17 +414,53 @@ async def edit_game_start(message: Message, state: FSMContext, db: Database) -> 
     await message.answer(f"{_games_short_list(db)}\n\nВведите ID игры для редактирования.")
 
 
-@router.message(F.text.in_({"Почасовой состав", "📈 Почасовой состав"}))
-async def hourly_roster_start(message: Message, state: FSMContext, db: Database) -> None:
+@router.message(F.text.in_({"Список игр", "📋 Список игр"}))
+async def games_list_start(message: Message, state: FSMContext, db: Database) -> None:
     if not db.is_admin(message.from_user.id):
         await message.answer("У вас нет прав администратора.")
         return
-    await state.set_state(AdminStates.waiting_for_game_id_to_hourly)
-    await message.answer(f"{_games_short_list(db)}\n\nВведите ID игры для просмотра почасового состава.")
+    days = db.list_game_days()
+    if not days:
+        await message.answer("Игр пока нет.")
+        return
+    await state.set_state(AdminStates.waiting_for_games_day_to_view)
+    await message.answer(
+        "Доступные игровые дни:\n"
+        f"{chr(10).join(f'• {day}' for day in days)}\n\n"
+        "Введите день в формате ДД.ММ.ГГГГ."
+    )
 
 
-@router.message(AdminStates.waiting_for_game_id_to_hourly, ~F.text.in_(BACK_BUTTONS))
-async def hourly_roster_show(message: Message, state: FSMContext, db: Database) -> None:
+@router.message(AdminStates.waiting_for_games_day_to_view, ~F.text.in_(BACK_BUTTONS))
+async def games_list_pick_day(message: Message, state: FSMContext, db: Database) -> None:
+    if not db.is_admin(message.from_user.id):
+        await state.clear()
+        await message.answer("У вас нет прав администратора.")
+        return
+
+    day = _parse_day(message.text or "")
+    if not day:
+        await message.answer("Неверный формат дня. Введите ДД.ММ.ГГГГ.")
+        return
+
+    games = db.list_games_by_day(day)
+    if not games:
+        await message.answer("На выбранный день игр нет. Введите другой день.")
+        return
+
+    await state.update_data(view_games_day=day)
+    await state.set_state(AdminStates.waiting_for_game_id_to_view)
+    lines = [f"Игры на {day}:"]
+    for game in games:
+        game_type = GAME_TYPE_LABELS.get(game.get("game_type", ""), game.get("game_type", "-"))
+        lines.append(f"• #{game['id']} | {game['time']} | {game['location']} | {game_type}")
+    lines.append("")
+    lines.append("Введите ID игры, чтобы посмотреть состав.")
+    await message.answer("\n".join(lines))
+
+
+@router.message(AdminStates.waiting_for_game_id_to_view, ~F.text.in_(BACK_BUTTONS))
+async def games_list_show_participants(message: Message, state: FSMContext, db: Database) -> None:
     if not db.is_admin(message.from_user.id):
         await state.clear()
         await message.answer("У вас нет прав администратора.")
@@ -464,52 +477,36 @@ async def hourly_roster_show(message: Message, state: FSMContext, db: Database) 
         await message.answer("Игра с таким ID не найдена.")
         return
 
-    game_start = _time_from_starts_at(game["starts_at"])
-    if not game_start:
-        await message.answer("Не удалось распознать время игры.")
-        await state.clear()
+    data = await state.get_data()
+    selected_day = data.get("view_games_day")
+    game_dt = _to_dt(game["starts_at"])
+    if selected_day and game_dt and game_dt.strftime("%d.%m.%Y") != selected_day:
+        await message.answer("Эта игра не из выбранного дня. Введите ID из списка.")
         return
 
     rows = db.list_game_registrations(game_id)
-    intervals = _hourly_intervals(game_start)
-    if not intervals:
-        await message.answer("Для этой игры нет часовых интервалов до 22:00.")
-        await state.clear()
-        return
+    by_role: dict[str, list[dict]] = {"host": [], "judge": [], "player": []}
+    for row in rows:
+        by_role.setdefault(row["role"], []).append(row)
 
-    lines: list[str] = [
-        f"📈 Почасовой состав игры #{game_id}",
+    lines = [
+        f"Состав игры #{game_id}",
         f"Когда: {game['starts_at']}",
         f"Где: {game['location']}",
         "",
     ]
-    for idx, (start_at, end_at) in enumerate(intervals):
-        lines.append(f"с {start_at} до {end_at}")
-        for role in ("host", "judge"):
-            label = ROLE_LABELS[role]
-            names = [
-                row["nickname"]
-                for row in rows
-                if row["role"] == role and _is_available_on_interval(row, start_at, end_at, game_start)
-            ]
-            lines.append(f"• {label}: {', '.join(names) if names else 'пока никого'}")
-
-        players = [
-            row["nickname"]
-            for row in rows
-            if row["role"] == "player" and _is_available_on_interval(row, start_at, end_at, game_start)
-        ]
-        if players:
-            lines.append("• Игроки:")
-            for p_idx, nickname in enumerate(players, start=1):
-                lines.append(f"  {p_idx}. {nickname}")
-        else:
-            lines.append("• Игроки: пока никого")
-        if idx < len(intervals) - 1:
-            lines.append("____________")
+    for role in ("host", "judge", "player"):
+        items = by_role.get(role, [])
+        lines.append(f"{ROLE_LABELS[role]}:")
+        if not items:
+            lines.append("• пока никого")
+            continue
+        for item in items:
+            lines.append(f"• {item['nickname']} {_username_suffix(item.get('username'))}")
+        lines.append("")
 
     await state.clear()
-    await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines).strip())
 
 
 @router.message(AdminStates.waiting_for_game_id_to_edit, ~F.text.in_(BACK_BUTTONS))

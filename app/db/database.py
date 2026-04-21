@@ -367,6 +367,30 @@ class Database:
         games.sort(key=lambda row: row["starts_at"])
         return games
 
+    def list_game_days(self) -> list[str]:
+        days: set[str] = set()
+        for game in self.list_games():
+            starts_at = self._parse_datetime(game["starts_at"])
+            if not starts_at:
+                continue
+            days.add(starts_at.strftime("%d.%m.%Y"))
+        return sorted(days, key=lambda raw: datetime.strptime(raw, "%d.%m.%Y"))
+
+    def list_games_by_day(self, day: str) -> list[dict[str, Any]]:
+        day_dt = datetime.strptime(day, "%d.%m.%Y")
+        games: list[dict[str, Any]] = []
+        for game in self.list_games():
+            starts_at = self._parse_datetime(game["starts_at"])
+            if not starts_at:
+                continue
+            if starts_at.date() != day_dt.date():
+                continue
+            game_copy = dict(game)
+            game_copy["time"] = starts_at.strftime("%H:%M")
+            games.append(game_copy)
+        games.sort(key=lambda row: row["starts_at"])
+        return games
+
     def is_game_open(self, game_id: int) -> bool:
         game = self.get_game_with_counts(game_id)
         if not game:
@@ -412,7 +436,7 @@ class Database:
     def list_game_registrations(self, game_id: int) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
-            SELECT u.nickname, r.role, r.available_from, r.available_until
+            SELECT u.nickname, u.username, r.role, r.available_from, r.available_until
             FROM registrations r
             JOIN users u ON u.id = r.user_id
             WHERE r.game_id = %s
@@ -430,6 +454,7 @@ class Database:
         return [
             {
                 "nickname": row["nickname"],
+                "username": row.get("username"),
                 "role": row["role"],
                 "available_from": row.get("available_from"),
                 "available_until": row["available_until"],
