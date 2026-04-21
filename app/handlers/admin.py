@@ -1,10 +1,11 @@
 from aiogram import Bot, F, Router
 from datetime import datetime
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from app.config import Config
 from app.db.database import Database, GAME_TYPE_LABELS, ROLE_LABELS
+from app.keyboards.inline import admin_game_days_keyboard, admin_games_by_day_keyboard
 from app.keyboards.reply import (
     admin_menu_keyboard,
     game_edit_field_keyboard,
@@ -419,69 +420,65 @@ async def games_list_start(message: Message, state: FSMContext, db: Database) ->
     if not db.is_admin(message.from_user.id):
         await message.answer("У вас нет прав администратора.")
         return
-    days = db.list_game_days()
-    if not days:
+    day_cards = db.list_game_day_cards()
+    if not day_cards:
         await message.answer("Игр пока нет.")
         return
-    await state.set_state(AdminStates.waiting_for_games_day_to_view)
+    lines = ["Доступные игровые дни:"]
+    for card in day_cards:
+        types = ", ".join(card.get("types", []))
+        if types:
+            lines.append(f"• {card['day']} | {types}")
+        else:
+            lines.append(f"• {card['day']}")
+    lines.append("")
+    lines.append("Выберите день кнопкой:")
     await message.answer(
-        "Доступные игровые дни:\n"
-        f"{chr(10).join(f'• {day}' for day in days)}\n\n"
-        "Введите день в формате ДД.ММ.ГГГГ."
+        "\n".join(lines),
+        reply_markup=admin_game_days_keyboard(day_cards),
     )
 
 
-@router.message(AdminStates.waiting_for_games_day_to_view, ~F.text.in_(BACK_BUTTONS))
-async def games_list_pick_day(message: Message, state: FSMContext, db: Database) -> None:
-    if not db.is_admin(message.from_user.id):
-        await state.clear()
-        await message.answer("У вас нет прав администратора.")
+@router.callback_query(F.data.startswith("adm_day:"))
+async def games_list_pick_day(callback: CallbackQuery, db: Database) -> None:
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("У вас нет прав администратора.", show_alert=True)
         return
 
-    day = _parse_day(message.text or "")
+    day_token = callback.data.split(":")[1]
+    day = _parse_day(f"{day_token[:2]}.{day_token[2:4]}.{day_token[4:]}")
     if not day:
-        await message.answer("Неверный формат дня. Введите ДД.ММ.ГГГГ.")
+        await callback.answer("Неверный формат дня.", show_alert=True)
         return
 
     games = db.list_games_by_day(day)
     if not games:
-        await message.answer("На выбранный день игр нет. Введите другой день.")
+        await callback.answer("На выбранный день игр нет.", show_alert=True)
         return
 
-    await state.update_data(view_games_day=day)
-    await state.set_state(AdminStates.waiting_for_game_id_to_view)
     lines = [f"Игры на {day}:"]
     for game in games:
         game_type = GAME_TYPE_LABELS.get(game.get("game_type", ""), game.get("game_type", "-"))
         lines.append(f"• #{game['id']} | {game['time']} | {game['location']} | {game_type}")
     lines.append("")
-    lines.append("Введите ID игры, чтобы посмотреть состав.")
-    await message.answer("\n".join(lines))
+    lines.append("Выберите игру кнопкой:")
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=admin_games_by_day_keyboard(games),
+    )
+    await callback.answer()
 
 
-@router.message(AdminStates.waiting_for_game_id_to_view, ~F.text.in_(BACK_BUTTONS))
-async def games_list_show_participants(message: Message, state: FSMContext, db: Database) -> None:
-    if not db.is_admin(message.from_user.id):
-        await state.clear()
-        await message.answer("У вас нет прав администратора.")
+@router.callback_query(F.data.startswith("adm_game:"))
+async def games_list_show_participants(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("У вас нет прав администратора.", show_alert=True)
         return
 
-    raw = (message.text or "").strip()
-    if not raw.isdigit():
-        await message.answer("ID должен быть числом.")
-        return
-
-    game_id = int(raw)
+    game_id = int(callback.data.split(":")[1])
     game = db.get_game(game_id)
     if not game:
-        await message.answer("Игра с таким ID не найдена.")
-        return
-
-    data = await state.get_data()
-    selected_day = data.get("view_games_day")
-    game_dt = _to_dt(game["starts_at"])
-    if selected_day and game_dt and game_dt.strftime("%d.%m.%Y") != selected_day:
-        await message.answer("Эта игра не из выбранного дня. Введите ID из списка.")
+        await callback.answer("Игра не найдена.", show_alert=True)
         return
 
     rows = db.list_game_registrations(game_id)
@@ -489,10 +486,12 @@ async def games_list_show_participants(message: Message, state: FSMContext, db: 
     for row in rows:
         by_role.setdefault(row["role"], []).append(row)
 
+    game_type = GAME_TYPE_LABELS.get(game.get("game_type", ""), game.get("game_type", "-"))
     lines = [
         f"Состав игры #{game_id}",
         f"Когда: {game['starts_at']}",
         f"Где: {game['location']}",
+        f"Тип: {game_type}",
         "",
     ]
     for role in ("host", "judge", "player"):
@@ -506,7 +505,8 @@ async def games_list_show_participants(message: Message, state: FSMContext, db: 
         lines.append("")
 
     await state.clear()
-    await message.answer("\n".join(lines).strip())
+    await callback.message.answer("\n".join(lines).strip())
+    await callback.answer()
 
 
 @router.message(AdminStates.waiting_for_game_id_to_edit, ~F.text.in_(BACK_BUTTONS))

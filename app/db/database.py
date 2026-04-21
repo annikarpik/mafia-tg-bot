@@ -376,6 +376,20 @@ class Database:
             days.add(starts_at.strftime("%d.%m.%Y"))
         return sorted(days, key=lambda raw: datetime.strptime(raw, "%d.%m.%Y"))
 
+    def list_game_day_cards(self) -> list[dict[str, Any]]:
+        cards: dict[str, set[str]] = {}
+        for game in self.list_games():
+            starts_at = self._parse_datetime(game["starts_at"])
+            if not starts_at:
+                continue
+            day = starts_at.strftime("%d.%m.%Y")
+            type_label = GAME_TYPE_LABELS.get(game.get("game_type", ""), str(game.get("game_type", "")))
+            cards.setdefault(day, set()).add(type_label)
+        result: list[dict[str, Any]] = []
+        for day in sorted(cards.keys(), key=lambda raw: datetime.strptime(raw, "%d.%m.%Y")):
+            result.append({"day": day, "types": sorted(cards[day])})
+        return result
+
     def list_games_by_day(self, day: str) -> list[dict[str, Any]]:
         day_dt = datetime.strptime(day, "%d.%m.%Y")
         games: list[dict[str, Any]] = []
