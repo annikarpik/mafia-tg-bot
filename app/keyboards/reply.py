@@ -87,7 +87,8 @@ def profile_edit_field_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🤵 Обращение"), KeyboardButton(text="🪪 ФИО")],
-            [KeyboardButton(text="🎓 Статус по пропуску"), KeyboardButton(text="🏷️ Никнейм")],
+            [KeyboardButton(text="🎓 Статус по пропуску"), KeyboardButton(text="🎭 Роль")],
+            [KeyboardButton(text="🏷️ Никнейм")],
             [KeyboardButton(text="↩️ Назад")],
         ],
         resize_keyboard=True,

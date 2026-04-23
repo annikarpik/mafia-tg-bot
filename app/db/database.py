@@ -229,6 +229,17 @@ class Database:
         )
         return cur.rowcount > 0
 
+    def update_user_preferred_roles(self, user_id: int, can_play: bool, can_staff: bool) -> bool:
+        cur = self.conn.execute(
+            """
+            UPDATE users
+            SET can_play = %s, can_staff = %s
+            WHERE id = %s
+            """,
+            (can_play, can_staff, user_id),
+        )
+        return cur.rowcount > 0
+
     # ----------------------------------------------------------------- admins
     def is_admin(self, tg_id: int) -> bool:
         return self.conn.execute("SELECT 1 FROM admins WHERE tg_id = %s", (tg_id,)).fetchone() is not None

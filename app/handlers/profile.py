@@ -6,6 +6,7 @@ from app.db.database import AFFILIATION_LABELS, Database
 from app.keyboards.reply import (
     affiliation_keyboard,
     main_keyboard,
+    preferred_roles_keyboard,
     profile_edit_field_keyboard,
     salutation_keyboard,
 )
@@ -58,6 +59,8 @@ async def profile_pick_field(message: Message, state: FSMContext) -> None:
         "🪪 ФИО": "full_name",
         "Статус по пропуску": "affiliation",
         "🎓 Статус по пропуску": "affiliation",
+        "Роль": "preferred_roles",
+        "🎭 Роль": "preferred_roles",
         "Никнейм": "nickname",
         "🏷️ Никнейм": "nickname",
     }
@@ -74,6 +77,11 @@ async def profile_pick_field(message: Message, state: FSMContext) -> None:
         await message.answer(
             "Выберите актуальный статус:",
             reply_markup=affiliation_keyboard(),
+        )
+    elif field == "preferred_roles":
+        await message.answer(
+            "Выберите предпочтение по ролям:",
+            reply_markup=preferred_roles_keyboard(),
         )
     elif field == "full_name":
         await message.answer("Введите новое ФИО:")
@@ -93,12 +101,14 @@ async def profile_save_value(message: Message, state: FSMContext, db: Database) 
     data = await state.get_data()
     field = data.get("profile_edit_field")
     raw = (message.text or "").strip()
-    if field not in {"salutation", "full_name", "affiliation", "nickname"}:
+    if field not in {"salutation", "full_name", "affiliation", "preferred_roles", "nickname"}:
         await state.clear()
         await message.answer("Поле не выбрано. Начните заново.")
         return
 
     value = raw
+    can_play: bool | None = None
+    can_staff: bool | None = None
     if field == "salutation":
         salutation_map = {
             "господин": "господин",
@@ -127,6 +137,20 @@ async def profile_save_value(message: Message, state: FSMContext, db: Database) 
         if not value:
             await message.answer("Выберите статус одной из кнопок.")
             return
+    elif field == "preferred_roles":
+        roles_map = {
+            "Игрок": (True, False),
+            "🎭 Игрок": (True, False),
+            "Ведущий/судья": (False, True),
+            "🎙️ Ведущий/судья": (False, True),
+            "Оба": (True, True),
+            "🎭+🎙️ Оба": (True, True),
+        }
+        selected = roles_map.get(raw)
+        if not selected:
+            await message.answer("Выберите роль одной из кнопок.")
+            return
+        can_play, can_staff = selected
     elif field == "nickname":
         if len(raw) < 3 or len(raw) > 32:
             await message.answer("Никнейм должен быть от 3 до 32 символов.")
@@ -135,7 +159,14 @@ async def profile_save_value(message: Message, state: FSMContext, db: Database) 
             await message.answer("Такой никнейм уже занят. Введите другой.")
             return
 
-    db.update_user_profile_field(user_id=int(user["id"]), field=field, value=value)
+    if field == "preferred_roles":
+        db.update_user_preferred_roles(
+            user_id=int(user["id"]),
+            can_play=bool(can_play),
+            can_staff=bool(can_staff),
+        )
+    else:
+        db.update_user_profile_field(user_id=int(user["id"]), field=field, value=value)
     await state.clear()
     refreshed = db.get_user_by_tg(tg_id)
     await message.answer(

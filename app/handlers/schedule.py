@@ -1,5 +1,6 @@
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.config import Config
@@ -24,6 +25,15 @@ def _restore_day(token: str) -> str | None:
 
 def _role_kind_label(role: str) -> str:
     return "Игрок" if role == "player" else "Ведущий/судья"
+
+
+def _my_registrations_text(items: list[dict]) -> str:
+    lines = ["Ваши регистрации:"]
+    for item in items:
+        game_type = GAME_TYPE_LABELS.get(item.get("game_type", ""), item.get("game_type", "-"))
+        role = _role_kind_label(item["role"])
+        lines.append(f"• #{item['id']} | {item['starts_at']} | {item['location']} | {game_type} | {role}")
+    return "\n".join(lines)
 
 
 @router.message(F.text.in_({"📝 Регистрация на игры", "🎭 Расписание игр", "Расписание игр"}))
@@ -161,26 +171,41 @@ async def register_for_game(callback: CallbackQuery, db: Database) -> None:
 
 
 @router.message(F.text.in_({"📋 Ваши регистрации", "📋 Список игр"}))
-async def my_registrations(message: Message, db: Database, config: Config) -> None:
+async def my_registrations(message: Message, state: FSMContext, db: Database, config: Config) -> None:
     ensure_superadmin(message.from_user.id, db, config)
     user = db.get_user_by_tg(message.from_user.id)
     if not user:
         await message.answer("Сначала пройдите регистрацию: /start")
         return
+    data = await state.get_data()
+    previous_message_id = data.get("my_registrations_message_id")
     items = db.list_user_registrations(int(user["id"]))
+    text = "У вас пока нет активных регистраций."
+    markup = None
     if not items:
-        await message.answer("У вас пока нет активных регистраций.")
-        return
-    lines = ["Ваши регистрации:"]
-    for item in items:
-        game_type = GAME_TYPE_LABELS.get(item.get("game_type", ""), item.get("game_type", "-"))
-        role = _role_kind_label(item["role"])
-        lines.append(f"• #{item['id']} | {item['starts_at']} | {item['location']} | {game_type} | {role}")
-    await message.answer("\n".join(lines), reply_markup=user_registrations_keyboard(items))
+        await state.update_data(my_registrations_message_id=None)
+    else:
+        text = _my_registrations_text(items)
+        markup = user_registrations_keyboard(items)
+
+    if previous_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=int(previous_message_id),
+                text=text,
+                reply_markup=markup,
+            )
+            return
+        except TelegramBadRequest:
+            pass
+
+    sent = await message.answer(text, reply_markup=markup)
+    await state.update_data(my_registrations_message_id=sent.message_id)
 
 
 @router.callback_query(F.data.startswith("myreg_cancel:"))
-async def cancel_my_registration(callback: CallbackQuery, db: Database) -> None:
+async def cancel_my_registration(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
     if not db.user_exists(callback.from_user.id):
         await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
         return
@@ -192,6 +217,15 @@ async def cancel_my_registration(callback: CallbackQuery, db: Database) -> None:
     removed = db.unregister_user(game_id=game_id, user_id=int(user["id"]))
     if removed:
         await callback.answer("Регистрация отменена.")
+        items = db.list_user_registrations(int(user["id"]))
+        if not items:
+            await callback.message.edit_text("У вас пока нет активных регистраций.")
+            await state.update_data(my_registrations_message_id=None)
+            return
+        await callback.message.edit_text(
+            _my_registrations_text(items),
+            reply_markup=user_registrations_keyboard(items),
+        )
     else:
         await callback.answer("Вы не зарегистрированы на эту игру.", show_alert=True)
 
