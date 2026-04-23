@@ -11,8 +11,9 @@ from app.keyboards.inline import (
     game_days_keyboard,
     game_slots_keyboard,
     game_types_keyboard,
+    my_registrations_actions_keyboard,
     registration_role_keyboard,
-    user_registrations_keyboard,
+    user_registrations_keyboard_by_mode,
 )
 from app.utils import ensure_superadmin
 
@@ -61,16 +62,55 @@ def _filter_registrations_by_stage(items: list[dict], stage: str) -> list[dict]:
     return filtered
 
 
-def _my_registrations_text(stage: str, visible_items: list[dict]) -> str:
+def _my_registrations_mode_text(mode: str, stage: str, visible_items: list[dict]) -> str:
     stage_label = "действующие" if stage == "active" else "завершенные"
-    lines = [
-        "Ваши регистрации.",
-        "Если хотите отменить регистрацию, нажмите на крестик рядом с нужной игрой.",
-        f"Сейчас показаны: {stage_label}.",
-    ]
+    if mode == "view":
+        lines = [
+            "Составы ваших игр.",
+            "Нажмите на игру, чтобы открыть состав участников.",
+            f"Сейчас показаны: {stage_label}.",
+        ]
+    else:
+        lines = [
+            "Ваши регистрации.",
+            "Если хотите отменить регистрацию, нажмите на крестик рядом с нужной игрой.",
+            f"Сейчас показаны: {stage_label}.",
+        ]
     if not visible_items:
         lines.append("В этом разделе пока нет игр.")
     return "\n".join(lines)
+
+
+def _game_participants_text(game: dict, rows: list[dict]) -> str:
+    by_role: dict[str, list[dict]] = {"host": [], "judge": [], "player": []}
+    for row in rows:
+        by_role.setdefault(row["role"], []).append(row)
+    game_type = GAME_TYPE_LABELS.get(game.get("game_type", ""), game.get("game_type", "-"))
+    lines = [
+        f"Состав игры #{game['id']}",
+        f"Когда: {game['starts_at']}",
+        f"Где: {game['location']}",
+        f"Тип: {game_type}",
+        "",
+    ]
+    role_titles = {
+        "host": "Ведущий",
+        "judge": "Судья",
+        "player": "Игроки",
+    }
+    for role in ("host", "judge", "player"):
+        items = by_role.get(role, [])
+        lines.append(f"{role_titles[role]}:")
+        if not items:
+            lines.append("• пока никого")
+            continue
+        for idx, item in enumerate(items, start=1):
+            if role == "player":
+                lines.append(f"{idx}. {item['nickname']}")
+            else:
+                lines.append(f"• {item['nickname']}")
+        lines.append("")
+    return "\n".join(lines).strip()
 
 
 @router.message(F.text.in_({"📝 Регистрация на игры", "🎭 Расписание игр", "Расписание игр"}))
@@ -247,36 +287,54 @@ async def my_registrations(message: Message, state: FSMContext, db: Database, co
     if not user:
         await message.answer("Сначала пройдите регистрацию: /start")
         return
-    data = await state.get_data()
-    previous_message_id = data.get("my_registrations_message_id")
-    current_stage = data.get("my_registrations_stage", "active")
-    if current_stage not in {"active", "completed"}:
-        current_stage = "active"
+    sent = await message.answer(
+        "Что хотите сделать с вашими регистрациями?",
+        reply_markup=my_registrations_actions_keyboard(),
+    )
+    await state.update_data(
+        my_registrations_message_id=sent.message_id,
+        my_registrations_stage="active",
+        my_registrations_mode=None,
+    )
+
+
+async def _render_my_registrations_mode(
+    callback: CallbackQuery, state: FSMContext, db: Database, mode: str, stage: str | None = None
+) -> None:
+    user = db.get_user_by_tg(callback.from_user.id)
+    if not user:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    effective_stage = stage or "active"
+    if effective_stage not in {"active", "completed"}:
+        effective_stage = "active"
     items = db.list_user_registrations(int(user["id"]))
-    text = "У вас пока нет активных регистраций."
-    markup = None
     if not items:
-        await state.update_data(my_registrations_message_id=None)
-    else:
-        visible_items = _filter_registrations_by_stage(items, current_stage)
-        text = _my_registrations_text(current_stage, visible_items)
-        markup = user_registrations_keyboard(visible_items, current_stage)
-        await state.update_data(my_registrations_stage=current_stage)
+        await callback.message.edit_text("У вас пока нет активных регистраций.")
+        await state.update_data(my_registrations_stage="active", my_registrations_mode=mode)
+        await callback.answer()
+        return
+    visible_items = _filter_registrations_by_stage(items, effective_stage)
+    await callback.message.edit_text(
+        _my_registrations_mode_text(mode, effective_stage, visible_items),
+        reply_markup=user_registrations_keyboard_by_mode(visible_items, effective_stage, mode),
+    )
+    await state.update_data(my_registrations_stage=effective_stage, my_registrations_mode=mode)
+    await callback.answer()
 
-    if previous_message_id:
-        try:
-            await message.bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=int(previous_message_id),
-                text=text,
-                reply_markup=markup,
-            )
-            return
-        except TelegramBadRequest:
-            pass
 
-    sent = await message.answer(text, reply_markup=markup)
-    await state.update_data(my_registrations_message_id=sent.message_id)
+@router.callback_query(F.data.startswith("myreg_action:"))
+async def choose_my_registrations_action(
+    callback: CallbackQuery, state: FSMContext, db: Database
+) -> None:
+    if not db.user_exists(callback.from_user.id):
+        await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
+        return
+    mode = callback.data.split(":")[1]
+    if mode not in {"view", "cancel"}:
+        await callback.answer("Некорректное действие.", show_alert=True)
+        return
+    await _render_my_registrations_mode(callback=callback, state=state, db=db, mode=mode, stage="active")
 
 
 @router.callback_query(F.data.startswith("myreg_stage:"))
@@ -290,22 +348,35 @@ async def switch_my_registrations_stage(
     if stage not in {"active", "completed"}:
         await callback.answer("Некорректный этап.", show_alert=True)
         return
+    data = await state.get_data()
+    mode = data.get("my_registrations_mode")
+    if mode not in {"view", "cancel"}:
+        await callback.answer("Сначала выберите действие: составы или отмена.", show_alert=True)
+        return
+    await _render_my_registrations_mode(callback=callback, state=state, db=db, mode=mode, stage=stage)
+
+
+@router.callback_query(F.data.startswith("myreg_view:"))
+async def show_my_registration_game_participants(
+    callback: CallbackQuery, state: FSMContext, db: Database
+) -> None:
+    if not db.user_exists(callback.from_user.id):
+        await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
+        return
+    game_id = int(callback.data.split(":")[1])
     user = db.get_user_by_tg(callback.from_user.id)
     if not user:
         await callback.answer("Пользователь не найден.", show_alert=True)
         return
-    items = db.list_user_registrations(int(user["id"]))
-    if not items:
-        await callback.message.edit_text("У вас пока нет активных регистраций.")
-        await state.update_data(my_registrations_message_id=None, my_registrations_stage="active")
-        await callback.answer()
+    if not db.user_registration(game_id=game_id, user_id=int(user["id"])):
+        await callback.answer("Вы не зарегистрированы на эту игру.", show_alert=True)
         return
-    visible_items = _filter_registrations_by_stage(items, stage)
-    await callback.message.edit_text(
-        _my_registrations_text(stage, visible_items),
-        reply_markup=user_registrations_keyboard(visible_items, stage),
-    )
-    await state.update_data(my_registrations_stage=stage)
+    game = db.get_game(game_id)
+    if not game:
+        await callback.answer("Игра не найдена.", show_alert=True)
+        return
+    rows = db.list_game_registrations(game_id)
+    await callback.message.answer(_game_participants_text(game, rows))
     await callback.answer()
 
 
@@ -332,9 +403,12 @@ async def cancel_my_registration(callback: CallbackQuery, state: FSMContext, db:
             await state.update_data(my_registrations_message_id=None, my_registrations_stage="active")
             return
         visible_items = _filter_registrations_by_stage(items, current_stage)
+        mode = data.get("my_registrations_mode", "cancel")
+        if mode not in {"view", "cancel"}:
+            mode = "cancel"
         await callback.message.edit_text(
-            _my_registrations_text(current_stage, visible_items),
-            reply_markup=user_registrations_keyboard(visible_items, current_stage),
+            _my_registrations_mode_text(mode, current_stage, visible_items),
+            reply_markup=user_registrations_keyboard_by_mode(visible_items, current_stage, mode),
         )
     else:
         await callback.answer("Вы не зарегистрированы на эту игру.", show_alert=True)

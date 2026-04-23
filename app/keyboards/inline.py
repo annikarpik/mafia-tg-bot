@@ -54,6 +54,19 @@ def game_slots_keyboard(game_type: str, role_kind: str, games: list[dict]) -> In
 
 
 def user_registrations_keyboard(items: list[dict], stage: str) -> InlineKeyboardMarkup:
+    return user_registrations_keyboard_by_mode(items=items, stage=stage, mode="cancel")
+
+
+def my_registrations_actions_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="👥 Составы игр", callback_data="myreg_action:view"),
+        InlineKeyboardButton(text="❌ Отменить регистрацию", callback_data="myreg_action:cancel"),
+    )
+    return kb.as_markup()
+
+
+def user_registrations_keyboard_by_mode(items: list[dict], stage: str, mode: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     active_label = "🟢 Действующие" if stage == "active" else "Действующие"
     completed_label = "✅ Завершенные" if stage == "completed" else "Завершенные"
@@ -61,12 +74,19 @@ def user_registrations_keyboard(items: list[dict], stage: str) -> InlineKeyboard
         InlineKeyboardButton(text=active_label, callback_data="myreg_stage:active"),
         InlineKeyboardButton(text=completed_label, callback_data="myreg_stage:completed"),
     )
+    is_view_mode = mode == "view"
     for item in items:
         role_label = "Игрок" if item.get("role") == "player" else "Ведущий/судья"
         kb.row(
             InlineKeyboardButton(
-            text=f"❌ #{item['id']} {item['starts_at']} ({role_label})",
-            callback_data=f"myreg_cancel:{item['id']}",
+                text=(
+                    f"👥 #{item['id']} {item['starts_at']} ({role_label})"
+                    if is_view_mode
+                    else f"❌ #{item['id']} {item['starts_at']} ({role_label})"
+                ),
+                callback_data=(
+                    f"myreg_view:{item['id']}" if is_view_mode else f"myreg_cancel:{item['id']}"
+                ),
             )
         )
     return kb.as_markup()
