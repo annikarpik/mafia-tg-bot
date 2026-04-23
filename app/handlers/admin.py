@@ -1,4 +1,5 @@
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from datetime import datetime, timedelta
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -128,21 +129,7 @@ def _parse_game_type_text(raw: str, allow_all: bool = False) -> str | None:
 
 
 def _list_day_cards_for_scope(db: Database, game_type: str) -> list[dict]:
-    cards: dict[str, set[str]] = {}
-    for game in db.list_games():
-        if game_type != "all" and game.get("game_type") != game_type:
-            continue
-        try:
-            dt = datetime.strptime(game["starts_at"], "%d.%m.%Y %H:%M")
-        except ValueError:
-            continue
-        day = dt.strftime("%d.%m.%Y")
-        type_label = GAME_TYPE_LABELS.get(game.get("game_type", ""), str(game.get("game_type", "")))
-        cards.setdefault(day, set()).add(type_label)
-    result: list[dict] = []
-    for day in sorted(cards.keys(), key=lambda raw: datetime.strptime(raw, "%d.%m.%Y")):
-        result.append({"day": day, "types": sorted(cards[day])})
-    return result
+    return db.list_game_day_cards_for_scope(game_type=game_type)
 
 
 def _games_for_day_and_scope(db: Database, day: str, game_type: str) -> list[dict]:
@@ -153,14 +140,7 @@ def _games_for_day_and_scope(db: Database, day: str, game_type: str) -> list[dic
 
 
 def _find_starts_conflicts(db: Database, planned_starts: list[str], scope_ids: set[int]) -> list[str]:
-    conflicts: set[str] = set()
-    for game in db.list_games():
-        if int(game["id"]) in scope_ids:
-            continue
-        starts_at = str(game.get("starts_at", ""))
-        if starts_at in planned_starts:
-            conflicts.add(starts_at)
-    return sorted(conflicts, key=lambda raw: datetime.strptime(raw, "%d.%m.%Y %H:%M"))
+    return db.find_conflicting_starts(planned_starts=planned_starts, excluded_game_ids=scope_ids)
 
 
 def _parse_time_range(raw: str) -> tuple[str, str] | None:
@@ -624,6 +604,7 @@ async def games_list_start(message: Message, state: FSMContext, db: Database) ->
         "\n".join(lines),
         reply_markup=admin_game_days_keyboard(day_cards),
     )
+    await state.update_data(admin_games_view_message_id=None)
 
 
 @router.callback_query(F.data.startswith("adm_day:"))
@@ -702,8 +683,24 @@ async def games_list_show_participants(callback: CallbackQuery, state: FSMContex
                 lines.append(f"• {item['nickname']} {_username_suffix(item.get('username'))}")
         lines.append("")
 
-    await state.clear()
-    await callback.message.answer("\n".join(lines).strip())
+    text = "\n".join(lines).strip()
+    data = await state.get_data()
+    previous_view_message_id = data.get("admin_games_view_message_id")
+    if previous_view_message_id:
+        try:
+            await callback.bot.edit_message_text(
+                chat_id=callback.message.chat.id,
+                message_id=int(previous_view_message_id),
+                text=text,
+            )
+            await callback.answer()
+            return
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                await callback.answer()
+                return
+    sent = await callback.message.answer(text)
+    await state.update_data(admin_games_view_message_id=sent.message_id)
     await callback.answer()
 
 

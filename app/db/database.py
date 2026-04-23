@@ -35,6 +35,7 @@ class Database:
         self.conn.autocommit = True
         self._init_db()
         self._ensure_schema_columns()
+        self._ensure_indexes()
 
     def close(self) -> None:
         self.conn.close()
@@ -148,6 +149,33 @@ class Database:
             self.conn.execute("ALTER TABLE registrations ADD COLUMN available_until TEXT")
         if not self._column_exists("registrations", "available_from"):
             self.conn.execute("ALTER TABLE registrations ADD COLUMN available_from TEXT")
+
+    def _ensure_indexes(self) -> None:
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_games_game_type ON games(game_type)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_games_starts_at_text ON games(starts_at)")
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_games_starts_at_ts
+            ON games ((to_timestamp(starts_at, 'DD.MM.YYYY HH24:MI')))
+            """
+        )
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_registrations_user_id ON registrations(user_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_registrations_game_id ON registrations(game_id)")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_registrations_game_role ON registrations(game_id, role)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_username_lower ON users(lower(username))"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_nickname_lower ON users(lower(nickname))"
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_users_phone_digits
+            ON users ((regexp_replace(phone, '[^0-9]', '', 'g')))
+            """
+        )
 
     # ------------------------------------------------------------------ users
     def user_exists(self, tg_id: int) -> bool:
@@ -349,24 +377,63 @@ class Database:
             return None
 
     def list_open_games(self) -> list[dict[str, Any]]:
-        now = datetime.now()
-        games: list[dict[str, Any]] = []
-        for game in self.list_games():
-            starts_at = self._parse_datetime(game["starts_at"])
-            if starts_at is None or starts_at >= now:
-                games.append(game)
-        return games
+        rows = self.conn.execute(
+            """
+            SELECT
+                g.id,
+                g.starts_at,
+                g.location,
+                g.game_type,
+                g.registration_until,
+                SUM(CASE WHEN r.role = 'host' THEN 1 ELSE 0 END) AS hosts,
+                SUM(CASE WHEN r.role = 'judge' THEN 1 ELSE 0 END) AS judges,
+                SUM(CASE WHEN r.role = 'player' THEN 1 ELSE 0 END) AS players,
+                (
+                    SELECT COUNT(*)
+                    FROM reserves rs
+                    WHERE rs.game_id = g.id
+                ) AS reserves
+            FROM games g
+            LEFT JOIN registrations r ON r.game_id = g.id
+            WHERE to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI') >= NOW()
+            GROUP BY g.id, g.starts_at, g.location, g.game_type, g.registration_until
+            ORDER BY to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI')
+            """
+        ).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "starts_at": r["starts_at"],
+                "location": r["location"],
+                "game_type": r["game_type"],
+                "registration_until": r["registration_until"],
+                "hosts": int(r["hosts"] or 0),
+                "judges": int(r["judges"] or 0),
+                "players": int(r["players"] or 0),
+                "staff": int(r["hosts"] or 0) + int(r["judges"] or 0),
+                "reserves": int(r["reserves"] or 0),
+            }
+            for r in rows
+        ]
 
     def list_open_days(self, game_type: str) -> list[str]:
-        days: set[str] = set()
-        for game in self.list_open_games():
-            if game.get("game_type") != game_type:
-                continue
-            dt = self._parse_datetime(game["starts_at"])
-            if not dt:
-                continue
-            days.add(dt.strftime("%d.%m.%Y"))
-        return sorted(days, key=lambda raw: datetime.strptime(raw, "%d.%m.%Y"))
+        rows = self.conn.execute(
+            """
+            SELECT day
+            FROM (
+                SELECT
+                    to_char(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI'), 'DD.MM.YYYY') AS day,
+                    MIN(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI')) AS min_start
+                FROM games g
+                WHERE g.game_type = %s
+                  AND to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI') >= NOW()
+                GROUP BY to_char(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI'), 'DD.MM.YYYY')
+            ) grouped
+            ORDER BY min_start
+            """,
+            (game_type,),
+        ).fetchall()
+        return [str(row["day"]) for row in rows]
 
     def list_user_registration_game_ids(self, user_id: int) -> set[int]:
         rows = self.conn.execute(
@@ -380,35 +447,75 @@ class Database:
         return {int(row["game_id"]) for row in rows}
 
     def list_open_days_for_user(self, game_type: str, user_id: int) -> list[str]:
-        registered_game_ids = self.list_user_registration_game_ids(user_id)
-        days: set[str] = set()
-        for game in self.list_open_games():
-            if game_type != "all" and game.get("game_type") != game_type:
-                continue
-            if int(game["id"]) in registered_game_ids:
-                continue
-            dt = self._parse_datetime(game["starts_at"])
-            if not dt:
-                continue
-            days.add(dt.strftime("%d.%m.%Y"))
-        return sorted(days, key=lambda raw: datetime.strptime(raw, "%d.%m.%Y"))
+        rows = self.conn.execute(
+            """
+            SELECT day
+            FROM (
+                SELECT
+                    to_char(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI'), 'DD.MM.YYYY') AS day,
+                    MIN(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI')) AS min_start
+                FROM games g
+                WHERE to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI') >= NOW()
+                  AND (%s = 'all' OR g.game_type = %s)
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM registrations r
+                        WHERE r.game_id = g.id AND r.user_id = %s
+                  )
+                GROUP BY to_char(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI'), 'DD.MM.YYYY')
+            ) grouped
+            ORDER BY min_start
+            """,
+            (game_type, game_type, user_id),
+        ).fetchall()
+        return [str(row["day"]) for row in rows]
 
     def list_open_games_by_type_and_day(self, game_type: str, day: str) -> list[dict[str, Any]]:
-        day_dt = datetime.strptime(day, "%d.%m.%Y")
-        games: list[dict[str, Any]] = []
-        for game in self.list_open_games():
-            if game_type != "all" and game.get("game_type") != game_type:
-                continue
-            starts_at = self._parse_datetime(game["starts_at"])
-            if not starts_at:
-                continue
-            if starts_at.date() != day_dt.date():
-                continue
-            game_copy = dict(game)
-            game_copy["time"] = starts_at.strftime("%H:%M")
-            games.append(game_copy)
-        games.sort(key=lambda row: row["starts_at"])
-        return games
+        rows = self.conn.execute(
+            """
+            SELECT
+                g.id,
+                g.starts_at,
+                g.location,
+                g.game_type,
+                g.registration_until,
+                SUM(CASE WHEN r.role = 'host' THEN 1 ELSE 0 END) AS hosts,
+                SUM(CASE WHEN r.role = 'judge' THEN 1 ELSE 0 END) AS judges,
+                SUM(CASE WHEN r.role = 'player' THEN 1 ELSE 0 END) AS players,
+                (
+                    SELECT COUNT(*)
+                    FROM reserves rs
+                    WHERE rs.game_id = g.id
+                ) AS reserves
+            FROM games g
+            LEFT JOIN registrations r ON r.game_id = g.id
+            WHERE to_char(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI'), 'DD.MM.YYYY') = %s
+              AND to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI') >= NOW()
+              AND (%s = 'all' OR g.game_type = %s)
+            GROUP BY g.id, g.starts_at, g.location, g.game_type, g.registration_until
+            ORDER BY to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI')
+            """,
+            (day, game_type, game_type),
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            starts_at = self._parse_datetime(row["starts_at"])
+            result.append(
+                {
+                    "id": int(row["id"]),
+                    "starts_at": row["starts_at"],
+                    "location": row["location"],
+                    "game_type": row["game_type"],
+                    "registration_until": row["registration_until"],
+                    "hosts": int(row["hosts"] or 0),
+                    "judges": int(row["judges"] or 0),
+                    "players": int(row["players"] or 0),
+                    "staff": int(row["hosts"] or 0) + int(row["judges"] or 0),
+                    "reserves": int(row["reserves"] or 0),
+                    "time": starts_at.strftime("%H:%M") if starts_at else "",
+                }
+            )
+        return result
 
     def list_open_games_by_type_and_day_for_user(
         self, game_type: str, day: str, user_id: int
@@ -421,42 +528,101 @@ class Database:
         ]
 
     def list_game_days(self) -> list[str]:
-        days: set[str] = set()
-        for game in self.list_games():
-            starts_at = self._parse_datetime(game["starts_at"])
-            if not starts_at:
-                continue
-            days.add(starts_at.strftime("%d.%m.%Y"))
-        return sorted(days, key=lambda raw: datetime.strptime(raw, "%d.%m.%Y"))
+        rows = self.conn.execute(
+            """
+            SELECT day
+            FROM (
+                SELECT
+                    to_char(to_timestamp(starts_at, 'DD.MM.YYYY HH24:MI'), 'DD.MM.YYYY') AS day,
+                    MIN(to_timestamp(starts_at, 'DD.MM.YYYY HH24:MI')) AS min_start
+                FROM games
+                GROUP BY day
+            ) grouped
+            ORDER BY min_start
+            """
+        ).fetchall()
+        return [str(row["day"]) for row in rows]
 
     def list_game_day_cards(self) -> list[dict[str, Any]]:
-        cards: dict[str, set[str]] = {}
-        for game in self.list_games():
-            starts_at = self._parse_datetime(game["starts_at"])
-            if not starts_at:
-                continue
-            day = starts_at.strftime("%d.%m.%Y")
-            type_label = GAME_TYPE_LABELS.get(game.get("game_type", ""), str(game.get("game_type", "")))
-            cards.setdefault(day, set()).add(type_label)
+        rows = self.conn.execute(
+            """
+            SELECT
+                to_char(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI'), 'DD.MM.YYYY') AS day,
+                array_agg(DISTINCT g.game_type) AS game_types
+            FROM games g
+            GROUP BY to_char(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI'), 'DD.MM.YYYY')
+            ORDER BY MIN(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI'))
+            """
+        ).fetchall()
         result: list[dict[str, Any]] = []
-        for day in sorted(cards.keys(), key=lambda raw: datetime.strptime(raw, "%d.%m.%Y")):
-            result.append({"day": day, "types": sorted(cards[day])})
+        for row in rows:
+            game_types = [GAME_TYPE_LABELS.get(gt, str(gt)) for gt in (row["game_types"] or [])]
+            result.append({"day": str(row["day"]), "types": sorted(game_types)})
+        return result
+
+    def list_game_day_cards_for_scope(self, game_type: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                to_char(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI'), 'DD.MM.YYYY') AS day,
+                array_agg(DISTINCT g.game_type) AS game_types
+            FROM games g
+            WHERE (%s = 'all' OR g.game_type = %s)
+            GROUP BY to_char(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI'), 'DD.MM.YYYY')
+            ORDER BY MIN(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI'))
+            """,
+            (game_type, game_type),
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            game_types = [GAME_TYPE_LABELS.get(gt, str(gt)) for gt in (row["game_types"] or [])]
+            result.append({"day": str(row["day"]), "types": sorted(game_types)})
         return result
 
     def list_games_by_day(self, day: str) -> list[dict[str, Any]]:
-        day_dt = datetime.strptime(day, "%d.%m.%Y")
-        games: list[dict[str, Any]] = []
-        for game in self.list_games():
-            starts_at = self._parse_datetime(game["starts_at"])
-            if not starts_at:
-                continue
-            if starts_at.date() != day_dt.date():
-                continue
-            game_copy = dict(game)
-            game_copy["time"] = starts_at.strftime("%H:%M")
-            games.append(game_copy)
-        games.sort(key=lambda row: row["starts_at"])
-        return games
+        rows = self.conn.execute(
+            """
+            SELECT
+                g.id,
+                g.starts_at,
+                g.location,
+                g.game_type,
+                g.registration_until,
+                SUM(CASE WHEN r.role = 'host' THEN 1 ELSE 0 END) AS hosts,
+                SUM(CASE WHEN r.role = 'judge' THEN 1 ELSE 0 END) AS judges,
+                SUM(CASE WHEN r.role = 'player' THEN 1 ELSE 0 END) AS players,
+                (
+                    SELECT COUNT(*)
+                    FROM reserves rs
+                    WHERE rs.game_id = g.id
+                ) AS reserves
+            FROM games g
+            LEFT JOIN registrations r ON r.game_id = g.id
+            WHERE to_char(to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI'), 'DD.MM.YYYY') = %s
+            GROUP BY g.id, g.starts_at, g.location, g.game_type, g.registration_until
+            ORDER BY to_timestamp(g.starts_at, 'DD.MM.YYYY HH24:MI')
+            """,
+            (day,),
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            starts_at = self._parse_datetime(row["starts_at"])
+            result.append(
+                {
+                    "id": int(row["id"]),
+                    "starts_at": row["starts_at"],
+                    "location": row["location"],
+                    "game_type": row["game_type"],
+                    "registration_until": row["registration_until"],
+                    "hosts": int(row["hosts"] or 0),
+                    "judges": int(row["judges"] or 0),
+                    "players": int(row["players"] or 0),
+                    "staff": int(row["hosts"] or 0) + int(row["judges"] or 0),
+                    "reserves": int(row["reserves"] or 0),
+                    "time": starts_at.strftime("%H:%M") if starts_at else "",
+                }
+            )
+        return result
 
     def is_game_open(self, game_id: int) -> bool:
         game = self.get_game_with_counts(game_id)
@@ -468,10 +634,61 @@ class Database:
         return starts_at >= datetime.now()
 
     def get_game_with_counts(self, game_id: int) -> dict[str, Any] | None:
-        for game in self.list_games():
-            if game["id"] == game_id:
-                return game
-        return None
+        row = self.conn.execute(
+            """
+            SELECT
+                g.id,
+                g.starts_at,
+                g.location,
+                g.game_type,
+                g.registration_until,
+                SUM(CASE WHEN r.role = 'host' THEN 1 ELSE 0 END) AS hosts,
+                SUM(CASE WHEN r.role = 'judge' THEN 1 ELSE 0 END) AS judges,
+                SUM(CASE WHEN r.role = 'player' THEN 1 ELSE 0 END) AS players,
+                (
+                    SELECT COUNT(*)
+                    FROM reserves rs
+                    WHERE rs.game_id = g.id
+                ) AS reserves
+            FROM games g
+            LEFT JOIN registrations r ON r.game_id = g.id
+            WHERE g.id = %s
+            GROUP BY g.id, g.starts_at, g.location, g.game_type, g.registration_until
+            """,
+            (game_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": int(row["id"]),
+            "starts_at": row["starts_at"],
+            "location": row["location"],
+            "game_type": row["game_type"],
+            "registration_until": row["registration_until"],
+            "hosts": int(row["hosts"] or 0),
+            "judges": int(row["judges"] or 0),
+            "players": int(row["players"] or 0),
+            "staff": int(row["hosts"] or 0) + int(row["judges"] or 0),
+            "reserves": int(row["reserves"] or 0),
+        }
+
+    def find_conflicting_starts(
+        self, planned_starts: list[str], excluded_game_ids: set[int] | None = None
+    ) -> list[str]:
+        if not planned_starts:
+            return []
+        excluded_ids = sorted(excluded_game_ids or set())
+        rows = self.conn.execute(
+            """
+            SELECT starts_at
+            FROM games
+            WHERE starts_at = ANY(%s)
+              AND NOT (id = ANY(%s))
+            ORDER BY to_timestamp(starts_at, 'DD.MM.YYYY HH24:MI')
+            """,
+            (planned_starts, excluded_ids),
+        ).fetchall()
+        return [str(row["starts_at"]) for row in rows]
 
     def update_game(
         self,
@@ -573,9 +790,20 @@ class Database:
     def list_user_registrations(self, user_id: int) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
-            SELECT g.id, g.starts_at, g.location, g.game_type, r.role
+            SELECT
+                g.id,
+                g.starts_at,
+                g.location,
+                g.game_type,
+                r.role,
+                COALESCE(rc.total_registered, 0) AS total_registered
             FROM registrations r
             JOIN games g ON g.id = r.game_id
+            LEFT JOIN (
+                SELECT game_id, COUNT(*) AS total_registered
+                FROM registrations
+                GROUP BY game_id
+            ) rc ON rc.game_id = g.id
             WHERE r.user_id = %s
             ORDER BY g.starts_at
             """,

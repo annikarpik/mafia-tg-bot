@@ -77,12 +77,13 @@ def user_registrations_keyboard_by_mode(items: list[dict], stage: str, mode: str
     is_view_mode = mode == "view"
     for item in items:
         role_label = "Игрок" if item.get("role") == "player" else "Ведущий/судья"
+        total_registered = int(item.get("total_registered", 0))
         kb.row(
             InlineKeyboardButton(
                 text=(
-                    f"👥 #{item['id']} {item['starts_at']} ({role_label})"
+                    f"👥 #{item['id']} {item['starts_at']} ({role_label}) ({total_registered}/13)"
                     if is_view_mode
-                    else f"❌ #{item['id']} {item['starts_at']} ({role_label})"
+                    else f"❌ #{item['id']} {item['starts_at']} ({role_label}) ({total_registered}/13)"
                 ),
                 callback_data=(
                     f"myreg_view:{item['id']}" if is_view_mode else f"myreg_cancel:{item['id']}"

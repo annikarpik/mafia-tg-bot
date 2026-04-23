@@ -295,6 +295,7 @@ async def my_registrations(message: Message, state: FSMContext, db: Database, co
         my_registrations_message_id=sent.message_id,
         my_registrations_stage="active",
         my_registrations_mode=None,
+        my_registrations_view_message_id=None,
     )
 
 
@@ -376,7 +377,24 @@ async def show_my_registration_game_participants(
         await callback.answer("Игра не найдена.", show_alert=True)
         return
     rows = db.list_game_registrations(game_id)
-    await callback.message.answer(_game_participants_text(game, rows))
+    text = _game_participants_text(game, rows)
+    data = await state.get_data()
+    previous_view_message_id = data.get("my_registrations_view_message_id")
+    if previous_view_message_id:
+        try:
+            await callback.bot.edit_message_text(
+                chat_id=callback.message.chat.id,
+                message_id=int(previous_view_message_id),
+                text=text,
+            )
+            await callback.answer()
+            return
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                await callback.answer()
+                return
+    sent = await callback.message.answer(text)
+    await state.update_data(my_registrations_view_message_id=sent.message_id)
     await callback.answer()
 
 
