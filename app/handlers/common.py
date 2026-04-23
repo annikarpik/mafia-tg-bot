@@ -5,8 +5,8 @@ from aiogram.types import Message
 
 from app.config import Config
 from app.db.database import Database
-from app.keyboards.reply import main_keyboard, request_contact_keyboard
-from app.states import RegistrationStates
+from app.keyboards.reply import admin_menu_keyboard, main_keyboard, request_contact_keyboard
+from app.states import AdminStates, RegistrationStates
 from app.utils import ensure_admin_by_phone, ensure_superadmin
 
 router = Router(name="common")
@@ -49,7 +49,11 @@ async def start_handler(
 async def back_to_main_handler(
     message: Message, state: FSMContext, db: Database
 ) -> None:
+    current_state = await state.get_state()
     await state.clear()
+    if current_state and current_state.startswith(f"{AdminStates.__name__}:") and db.is_admin(message.from_user.id):
+        await message.answer("Админ-меню 🛠️", reply_markup=admin_menu_keyboard())
+        return
     await message.answer(
         "Главное меню 🧭",
         reply_markup=main_keyboard(is_admin=db.is_admin(message.from_user.id)),

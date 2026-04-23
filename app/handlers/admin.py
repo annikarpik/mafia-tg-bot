@@ -1,28 +1,27 @@
 from aiogram import Bot, F, Router
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.config import Config
 from app.db.database import Database, GAME_TYPE_LABELS, ROLE_LABELS
-from app.keyboards.inline import admin_game_days_keyboard, admin_games_by_day_keyboard
+from app.keyboards.inline import (
+    admin_edit_game_days_keyboard,
+    admin_game_days_keyboard,
+    admin_games_by_day_keyboard,
+)
 from app.keyboards.reply import (
     admin_menu_keyboard,
+    back_only_keyboard,
     game_edit_field_keyboard,
     game_type_keyboard,
+    game_type_with_all_keyboard,
 )
 from app.states import AdminStates
-from app.utils import ensure_superadmin, normalize_phone, parse_game_datetime
+from app.utils import ensure_superadmin, normalize_phone
 
 router = Router(name="admin")
 BACK_BUTTONS = {"Назад", "↩️ Назад"}
-
-
-def _to_dt(raw: str) -> datetime | None:
-    try:
-        return datetime.strptime(raw, "%d.%m.%Y %H:%M")
-    except ValueError:
-        return None
 
 
 def _resolve_admin_target(raw_value: str, db: Database) -> tuple[int | None, str | None]:
@@ -73,11 +72,6 @@ async def _notify_users_about_game_update(
         changes.append(f"• Время игры: {before['starts_at']} -> {after['starts_at']}")
     if before["location"] != after["location"]:
         changes.append(f"• Место: {before['location']} -> {after['location']}")
-    if before["registration_until"] != after["registration_until"]:
-        changes.append(
-            "• Окончание регистрации: "
-            f"{before['registration_until']} -> {after['registration_until']}"
-        )
 
     if not changes:
         return
@@ -94,19 +88,6 @@ async def _notify_users_about_game_update(
             pass
 
 
-def _games_short_list(db: Database) -> str:
-    games = db.list_games()
-    if not games:
-        return "Игр нет."
-    lines = ["Текущие игры:"]
-    for game in games:
-        game_type = GAME_TYPE_LABELS.get(game.get("game_type", ""), game.get("game_type", "-"))
-        lines.append(
-            f"• #{game['id']} | {game['starts_at']} | {game['location']} | {game_type} | рег. до {game['registration_until']}"
-        )
-    return "\n".join(lines)
-
-
 def _to_minutes(raw: str) -> int | None:
     try:
         hh, mm = raw.split(":")
@@ -121,6 +102,65 @@ def _parse_day(raw: str) -> str | None:
         return dt.strftime("%d.%m.%Y")
     except ValueError:
         return None
+
+
+def _parse_time(raw: str) -> str | None:
+    try:
+        dt = datetime.strptime(raw.strip(), "%H:%M")
+        return dt.strftime("%H:%M")
+    except ValueError:
+        return None
+
+
+def _parse_game_type_text(raw: str, allow_all: bool = False) -> str | None:
+    mapping = {
+        "🏆 Турнир": "tournament",
+        "Турнир": "tournament",
+        "🎉 Фанки": "funky",
+        "Фанки": "funky",
+        "📚 Обучающие": "training",
+        "Обучающие": "training",
+    }
+    text = (raw or "").strip()
+    if allow_all and text in {"📋 Все игры", "Все игры"}:
+        return "all"
+    return mapping.get(text)
+
+
+def _list_day_cards_for_scope(db: Database, game_type: str) -> list[dict]:
+    cards: dict[str, set[str]] = {}
+    for game in db.list_games():
+        if game_type != "all" and game.get("game_type") != game_type:
+            continue
+        try:
+            dt = datetime.strptime(game["starts_at"], "%d.%m.%Y %H:%M")
+        except ValueError:
+            continue
+        day = dt.strftime("%d.%m.%Y")
+        type_label = GAME_TYPE_LABELS.get(game.get("game_type", ""), str(game.get("game_type", "")))
+        cards.setdefault(day, set()).add(type_label)
+    result: list[dict] = []
+    for day in sorted(cards.keys(), key=lambda raw: datetime.strptime(raw, "%d.%m.%Y")):
+        result.append({"day": day, "types": sorted(cards[day])})
+    return result
+
+
+def _games_for_day_and_scope(db: Database, day: str, game_type: str) -> list[dict]:
+    games = db.list_games_by_day(day)
+    if game_type == "all":
+        return games
+    return [game for game in games if game.get("game_type") == game_type]
+
+
+def _find_starts_conflicts(db: Database, planned_starts: list[str], scope_ids: set[int]) -> list[str]:
+    conflicts: set[str] = set()
+    for game in db.list_games():
+        if int(game["id"]) in scope_ids:
+            continue
+        starts_at = str(game.get("starts_at", ""))
+        if starts_at in planned_starts:
+            conflicts.add(starts_at)
+    return sorted(conflicts, key=lambda raw: datetime.strptime(raw, "%d.%m.%Y %H:%M"))
 
 
 def _parse_time_range(raw: str) -> tuple[str, str] | None:
@@ -184,7 +224,8 @@ async def add_admin_start(message: Message, state: FSMContext, db: Database) -> 
     await state.set_state(AdminStates.waiting_for_admin_to_add)
     await message.answer(
         "Введите Telegram ID, номер телефона или @username пользователя,\n"
-        "которого хотите назначить администратором."
+        "которого хотите назначить администратором.",
+        reply_markup=back_only_keyboard(),
     )
 
 
@@ -249,7 +290,8 @@ async def remove_admin_start(message: Message, state: FSMContext, db: Database) 
     await state.set_state(AdminStates.waiting_for_admin_to_remove)
     await message.answer(
         "Введите Telegram ID, номер телефона или @username администратора для удаления.\n"
-        f"Текущие администраторы: {', '.join(map(str, admins)) if admins else 'нет'}"
+        f"Текущие администраторы: {', '.join(map(str, admins)) if admins else 'нет'}",
+        reply_markup=back_only_keyboard(),
     )
 
 
@@ -260,7 +302,36 @@ async def remove_admin_finish(message: Message, state: FSMContext, db: Database)
         await state.clear()
         return
 
-    target, error = _resolve_admin_target(message.text or "", db)
+    raw = (message.text or "").strip()
+    if raw.startswith("@"):
+        username = raw.lstrip("@")
+        user = db.get_user_by_username(raw)
+        removed_admin = False
+        if user:
+            target = int(user["tg_id"])
+            if target == message.from_user.id:
+                await message.answer("Нельзя удалить самого себя из администраторов.")
+                return
+            removed_admin = db.remove_admin(target)
+        removed_pending = db.remove_pending_admin_username(raw)
+        await state.clear()
+        if removed_admin and removed_pending:
+            await message.answer(
+                f"Администратор @{username} удалён. Также удалено отложенное назначение из списка ожидания."
+            )
+        elif removed_admin:
+            await message.answer(f"Администратор @{username} удалён.")
+        elif removed_pending:
+            await message.answer(
+                f"Пользователь @{username} удалён из списка ожидания на админ-права."
+            )
+        else:
+            await message.answer(
+                f"Пользователь @{username} не найден ни среди администраторов, ни в списке ожидания."
+            )
+        return
+
+    target, error = _resolve_admin_target(raw, db)
     if error:
         await message.answer(error)
         return
@@ -296,15 +367,7 @@ async def create_game_type(message: Message, state: FSMContext, db: Database) ->
         await state.clear()
         return
 
-    type_map = {
-        "🏆 Турнир": "tournament",
-        "Турнир": "tournament",
-        "🎉 Фанки": "funky",
-        "Фанки": "funky",
-        "📚 Обучающие": "training",
-        "Обучающие": "training",
-    }
-    game_type = type_map.get((message.text or "").strip())
+    game_type = _parse_game_type_text(message.text or "", allow_all=False)
     if not game_type:
         await message.answer("Выберите формат кнопкой: Турнир, Фанки или Обучающие.")
         return
@@ -387,7 +450,6 @@ async def create_game_time_range(message: Message, state: FSMContext, db: Databa
             db.create_game(
                 starts_at=starts_at,
                 location=location,
-                registration_until=starts_at,
                 game_type=game_type,
             )
         )
@@ -411,8 +473,133 @@ async def edit_game_start(message: Message, state: FSMContext, db: Database) -> 
     if not db.is_admin(message.from_user.id):
         await message.answer("У вас нет прав администратора.")
         return
-    await state.set_state(AdminStates.waiting_for_game_id_to_edit)
-    await message.answer(f"{_games_short_list(db)}\n\nВведите ID игры для редактирования.")
+    await state.set_state(AdminStates.waiting_for_edit_game_type)
+    await message.answer(
+        "Выберите формат игр для редактирования или покажите все игры:",
+        reply_markup=game_type_with_all_keyboard(),
+    )
+
+
+@router.message(AdminStates.waiting_for_edit_game_type, ~F.text.in_(BACK_BUTTONS))
+async def edit_game_pick_type(message: Message, state: FSMContext, db: Database) -> None:
+    if not db.is_admin(message.from_user.id):
+        await state.clear()
+        await message.answer("У вас нет прав администратора.")
+        return
+    game_type = _parse_game_type_text(message.text or "", allow_all=True)
+    if not game_type:
+        await message.answer("Выберите формат кнопкой: Турнир, Фанки, Обучающие или Все игры.")
+        return
+    day_cards = _list_day_cards_for_scope(db, game_type)
+    if not day_cards:
+        await message.answer("Для выбранного формата игровые дни не найдены.")
+        return
+    await state.update_data(edit_scope_game_type=game_type)
+    await state.set_state(AdminStates.waiting_for_edit_game_day)
+    lines = ["Выберите игровой день для редактирования:"]
+    for card in day_cards:
+        types = ", ".join(card.get("types", []))
+        if types:
+            lines.append(f"• {card['day']} | {types}")
+        else:
+            lines.append(f"• {card['day']}")
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=admin_edit_game_days_keyboard(day_cards),
+    )
+    await message.answer("Для отмены нажмите «Назад».", reply_markup=back_only_keyboard())
+
+
+@router.callback_query(F.data.startswith("adm_edit_day:"))
+async def edit_game_pick_day(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("У вас нет прав администратора.", show_alert=True)
+        return
+    data = await state.get_data()
+    game_type = str(data.get("edit_scope_game_type", ""))
+    if game_type not in {"all", *GAME_TYPE_LABELS.keys()}:
+        await callback.answer("Сначала выберите формат для редактирования.", show_alert=True)
+        return
+    day_token = callback.data.split(":")[1]
+    day = _parse_day(f"{day_token[:2]}.{day_token[2:4]}.{day_token[4:]}")
+    if not day:
+        await callback.answer("Неверный формат дня.", show_alert=True)
+        return
+    games = _games_for_day_and_scope(db, day, game_type)
+    if not games:
+        await callback.answer("На выбранный день игр нет.", show_alert=True)
+        return
+    await state.update_data(
+        edit_scope_day=day,
+        edit_scope_game_ids=[int(game["id"]) for game in games],
+    )
+    await state.set_state(AdminStates.waiting_for_edit_day_action)
+    scope_label = "всех форматов" if game_type == "all" else GAME_TYPE_LABELS[game_type]
+    await callback.message.answer(
+        f"Выбран день {day} ({scope_label}). Что хотите изменить?",
+        reply_markup=game_edit_field_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_for_edit_day_action, ~F.text.in_(BACK_BUTTONS))
+async def edit_game_pick_day_action(message: Message, state: FSMContext, db: Database) -> None:
+    if not db.is_admin(message.from_user.id):
+        await state.clear()
+        await message.answer("У вас нет прав администратора.")
+        return
+    data = await state.get_data()
+    game_ids = data.get("edit_scope_game_ids") or []
+    if not game_ids:
+        await state.clear()
+        await message.answer("Игровой день не выбран. Начните заново.")
+        return
+    action_map = {
+        "Время": "time",
+        "🕒 Время": "time",
+        "Дата": "date",
+        "📅 Дата": "date",
+        "Место": "location",
+        "📍 Место": "location",
+        "Формат игры": "game_type",
+        "🎮 Формат игры": "game_type",
+        "Удалить игровой день": "delete_day",
+        "🗑️ Удалить игровой день": "delete_day",
+    }
+    action = action_map.get((message.text or "").strip())
+    if not action:
+        await message.answer("Выберите действие кнопкой.")
+        return
+    if action == "delete_day":
+        deleted = 0
+        for game_id in game_ids:
+            if db.delete_game(int(game_id)):
+                deleted += 1
+        await state.set_state(AdminStates.waiting_for_edit_game_type)
+        await state.update_data(edit_scope_day=None, edit_scope_game_ids=[])
+        await message.answer(f"Игровой день удалён ✅ Удалено игр: {deleted}.")
+        await message.answer(
+            "Выберите формат игр для следующего редактирования:",
+            reply_markup=game_type_with_all_keyboard(),
+        )
+        return
+    await state.update_data(edit_day_action=action)
+    await state.set_state(AdminStates.waiting_for_edit_value)
+    if action == "time":
+        await message.answer(
+            "Введите новое время старта первой игры дня в формате ЧЧ:ММ.\n"
+            "Остальные игры этого дня сдвинутся по часу.",
+            reply_markup=back_only_keyboard(),
+        )
+    elif action == "date":
+        await message.answer("Введите новую дату в формате ДД.ММ.ГГГГ.", reply_markup=back_only_keyboard())
+    elif action == "location":
+        await message.answer("Введите новое место для всех игр выбранного дня.", reply_markup=back_only_keyboard())
+    elif action == "game_type":
+        await message.answer(
+            "Выберите новый формат игр для выбранного дня.",
+            reply_markup=game_type_keyboard(),
+        )
 
 
 @router.message(F.text.in_({"Список игр", "📋 Список игр"}))
@@ -494,77 +681,27 @@ async def games_list_show_participants(callback: CallbackQuery, state: FSMContex
         f"Тип: {game_type}",
         "",
     ]
+    role_titles = {
+        "host": "Ведущий",
+        "judge": "Судья",
+        "player": "Игроки",
+    }
     for role in ("host", "judge", "player"):
         items = by_role.get(role, [])
-        lines.append(f"{ROLE_LABELS[role]}:")
+        lines.append(f"{role_titles[role]}:")
         if not items:
             lines.append("• пока никого")
             continue
-        for item in items:
-            lines.append(f"• {item['nickname']} {_username_suffix(item.get('username'))}")
+        for idx, item in enumerate(items, start=1):
+            if role == "player":
+                lines.append(f"{idx}. {item['nickname']} {_username_suffix(item.get('username'))}")
+            else:
+                lines.append(f"• {item['nickname']} {_username_suffix(item.get('username'))}")
         lines.append("")
 
     await state.clear()
     await callback.message.answer("\n".join(lines).strip())
     await callback.answer()
-
-
-@router.message(AdminStates.waiting_for_game_id_to_edit, ~F.text.in_(BACK_BUTTONS))
-async def edit_game_pick_id(message: Message, state: FSMContext, db: Database) -> None:
-    if not db.is_admin(message.from_user.id):
-        await state.clear()
-        await message.answer("У вас нет прав администратора.")
-        return
-    raw = (message.text or "").strip()
-    if not raw.isdigit():
-        await message.answer("ID должен быть числом.")
-        return
-    game_id = int(raw)
-    game = db.get_game(game_id)
-    if not game:
-        await message.answer("Игра с таким ID не найдена.")
-        return
-    await state.update_data(edit_game_id=game_id)
-    await state.set_state(AdminStates.waiting_for_edit_field)
-    await message.answer("Что хотите изменить?", reply_markup=game_edit_field_keyboard())
-
-
-@router.message(AdminStates.waiting_for_edit_field, ~F.text.in_(BACK_BUTTONS))
-async def edit_game_pick_field(message: Message, state: FSMContext, db: Database) -> None:
-    text = (message.text or "").strip()
-    field_map = {
-        "Время игры": "starts_at",
-        "🕒 Время игры": "starts_at",
-        "Место": "location",
-        "📍 Место": "location",
-        "Окончание регистрации": "registration_until",
-        "⏳ Окончание регистрации": "registration_until",
-        "🗑️ Удалить игру": "delete_game",
-    }
-    field = field_map.get(text)
-    if not field:
-        await message.answer("Выберите поле кнопкой.")
-        return
-    if field == "delete_game":
-        data = await state.get_data()
-        game_id = data.get("edit_game_id")
-        if not game_id:
-            await state.clear()
-            await message.answer("Игра не выбрана. Начните заново.")
-            return
-        deleted = db.delete_game(int(game_id))
-        await state.clear()
-        if deleted:
-            await message.answer(f"Игра #{game_id} удалена ✅")
-        else:
-            await message.answer("Игра с таким ID не найдена.")
-        return
-    await state.update_data(edit_field=field)
-    await state.set_state(AdminStates.waiting_for_edit_value)
-    if field in {"starts_at", "registration_until"}:
-        await message.answer("Введите новое значение в формате ДД.ММ.ГГГГ ЧЧ:ММ")
-    else:
-        await message.answer("Введите новое место проведения.")
 
 
 @router.message(AdminStates.waiting_for_edit_value, ~F.text.in_(BACK_BUTTONS))
@@ -574,61 +711,115 @@ async def edit_game_apply(message: Message, state: FSMContext, db: Database, bot
         await message.answer("У вас нет прав администратора.")
         return
     data = await state.get_data()
-    game_id = data.get("edit_game_id")
-    field = data.get("edit_field")
-    if not game_id or not field:
+    day = data.get("edit_scope_day")
+    game_type = data.get("edit_scope_game_type")
+    game_ids = [int(item) for item in (data.get("edit_scope_game_ids") or [])]
+    action = data.get("edit_day_action")
+    if not day or not game_type or not game_ids or not action:
         await state.clear()
         await message.answer("Данные редактирования потеряны. Начните заново.")
         return
 
+    selected_games = _games_for_day_and_scope(db, day, game_type)
+    selected_games = [game for game in selected_games if int(game["id"]) in set(game_ids)]
+    if not selected_games:
+        await state.clear()
+        await message.answer("Игры выбранного дня не найдены. Начните заново.")
+        return
+
     value_raw = (message.text or "").strip()
-    updates: dict[str, str] = {}
-    if field in {"starts_at", "registration_until"}:
-        parsed = parse_game_datetime(value_raw)
-        if not parsed:
-            await message.answer("Неверный формат. Используйте ДД.ММ.ГГГГ ЧЧ:ММ")
+    selected_games.sort(key=lambda row: row["starts_at"])
+    scope_ids = {int(game["id"]) for game in selected_games}
+
+    if action == "time":
+        parsed_time = _parse_time(value_raw)
+        if not parsed_time:
+            await message.answer("Неверный формат времени. Используйте ЧЧ:ММ.")
             return
-        updates[field] = parsed
-    else:
+        first_dt = datetime.strptime(f"{day} {parsed_time}", "%d.%m.%Y %H:%M")
+        planned_by_game: dict[int, str] = {}
+        for idx, game in enumerate(selected_games):
+            new_dt = first_dt + timedelta(hours=idx)
+            if new_dt.strftime("%d.%m.%Y") != day:
+                await message.answer("Новый диапазон времени выходит за пределы суток. Укажите более раннее время.")
+                return
+            planned_by_game[int(game["id"])] = new_dt.strftime("%d.%m.%Y %H:%M")
+        conflicts = _find_starts_conflicts(db, list(planned_by_game.values()), scope_ids)
+        if conflicts:
+            conflicts_text = "\n".join(f"• {item}" for item in conflicts)
+            await message.answer(
+                "На выбранные дату и время уже есть игры. Изменение не применено:\n"
+                f"{conflicts_text}"
+            )
+            return
+        for game in selected_games:
+            game_id = int(game["id"])
+            before = dict(game)
+            db.update_game(game_id=game_id, starts_at=planned_by_game[game_id])
+            after = db.get_game(game_id)
+            await _notify_users_about_game_update(bot=bot, db=db, game_id=game_id, before=before, after=after)
+        await state.set_state(AdminStates.waiting_for_edit_game_type)
+        await state.update_data(edit_scope_day=None, edit_scope_game_ids=[], edit_day_action=None)
+        await message.answer("Время игр обновлено ✅")
+        await message.answer("Выберите формат игр для следующего редактирования:", reply_markup=game_type_with_all_keyboard())
+        return
+
+    if action == "date":
+        parsed_day = _parse_day(value_raw)
+        if not parsed_day:
+            await message.answer("Неверный формат даты. Используйте ДД.ММ.ГГГГ.")
+            return
+        planned_by_game: dict[int, str] = {}
+        for game in selected_games:
+            time_raw = str(game["starts_at"]).split(" ")[1]
+            planned_by_game[int(game["id"])] = f"{parsed_day} {time_raw}"
+        conflicts = _find_starts_conflicts(db, list(planned_by_game.values()), scope_ids)
+        if conflicts:
+            conflicts_text = "\n".join(f"• {item}" for item in conflicts)
+            await message.answer(
+                "На выбранные дату и время уже есть игры. Изменение не применено:\n"
+                f"{conflicts_text}"
+            )
+            return
+        for game in selected_games:
+            game_id = int(game["id"])
+            before = dict(game)
+            db.update_game(game_id=game_id, starts_at=planned_by_game[game_id])
+            after = db.get_game(game_id)
+            await _notify_users_about_game_update(bot=bot, db=db, game_id=game_id, before=before, after=after)
+        await state.set_state(AdminStates.waiting_for_edit_game_type)
+        await state.update_data(edit_scope_day=None, edit_scope_game_ids=[], edit_day_action=None)
+        await message.answer("Дата игр обновлена ✅")
+        await message.answer("Выберите формат игр для следующего редактирования:", reply_markup=game_type_with_all_keyboard())
+        return
+
+    if action == "location":
         if len(value_raw) < 3:
             await message.answer("Место должно быть не короче 3 символов.")
             return
-        updates[field] = value_raw
-
-    game = db.get_game(game_id)
-    if not game:
-        await state.clear()
-        await message.answer("Игра больше не существует.")
-        return
-    game_before = dict(game)
-
-    starts_at = updates.get("starts_at", game["starts_at"])
-    registration_until = updates.get("registration_until", game["registration_until"])
-    starts_dt = _to_dt(starts_at)
-    reg_dt = _to_dt(registration_until)
-    if starts_dt and reg_dt and reg_dt > starts_dt:
-        await message.answer("Окончание регистрации должно быть не позже начала игры.")
+        for game in selected_games:
+            game_id = int(game["id"])
+            before = dict(game)
+            db.update_game(game_id=game_id, location=value_raw)
+            after = db.get_game(game_id)
+            await _notify_users_about_game_update(bot=bot, db=db, game_id=game_id, before=before, after=after)
+        await state.set_state(AdminStates.waiting_for_edit_game_type)
+        await state.update_data(edit_scope_day=None, edit_scope_game_ids=[], edit_day_action=None)
+        await message.answer("Место для игрового дня обновлено ✅")
+        await message.answer("Выберите формат игр для следующего редактирования:", reply_markup=game_type_with_all_keyboard())
         return
 
-    updated = db.update_game(
-        game_id=game_id,
-        starts_at=updates.get("starts_at"),
-        location=updates.get("location"),
-        registration_until=updates.get("registration_until"),
-    )
-    await state.clear()
-    if not updated:
-        await message.answer("Не удалось обновить игру.")
+    if action == "game_type":
+        new_type = _parse_game_type_text(value_raw, allow_all=False)
+        if not new_type:
+            await message.answer("Выберите формат кнопкой: Турнир, Фанки или Обучающие.")
+            return
+        for game in selected_games:
+            db.update_game_type(game_id=int(game["id"]), game_type=new_type)
+        await state.set_state(AdminStates.waiting_for_edit_game_type)
+        await state.update_data(edit_scope_day=None, edit_scope_game_ids=[], edit_day_action=None)
+        await message.answer(f"Формат игр обновлён на «{GAME_TYPE_LABELS[new_type]}» ✅")
+        await message.answer("Выберите формат игр для следующего редактирования:", reply_markup=game_type_with_all_keyboard())
         return
-    refreshed = db.get_game(game_id)
-    await _notify_users_about_game_update(
-        bot=bot,
-        db=db,
-        game_id=game_id,
-        before=game_before,
-        after=refreshed,
-    )
-    await message.answer(
-        "Игра обновлена ✅\n"
-        f"#{game_id} | {refreshed['starts_at']} | {refreshed['location']} | рег. до {refreshed['registration_until']}"
-    )
+
+    await message.answer("Неизвестное действие. Выберите действие заново.")

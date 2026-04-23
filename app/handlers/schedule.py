@@ -2,10 +2,12 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
+from datetime import datetime
 
 from app.config import Config
 from app.db.database import Database, GAME_TYPE_LABELS
 from app.keyboards.inline import (
+    ALL_GAMES_TOKEN,
     game_days_keyboard,
     game_slots_keyboard,
     game_types_keyboard,
@@ -27,12 +29,47 @@ def _role_kind_label(role: str) -> str:
     return "Игрок" if role == "player" else "Ведущий/судья"
 
 
-def _my_registrations_text(items: list[dict]) -> str:
-    lines = ["Ваши регистрации:"]
+def _game_type_title(game_type: str) -> str:
+    if game_type == ALL_GAMES_TOKEN:
+        return "Все форматы"
+    return GAME_TYPE_LABELS[game_type]
+
+
+def _is_valid_game_type(game_type: str) -> bool:
+    return game_type == ALL_GAMES_TOKEN or game_type in GAME_TYPE_LABELS
+
+
+def _parse_starts_at(raw: str) -> datetime | None:
+    try:
+        return datetime.strptime(raw, "%d.%m.%Y %H:%M")
+    except ValueError:
+        return None
+
+
+def _filter_registrations_by_stage(items: list[dict], stage: str) -> list[dict]:
+    now = datetime.now()
+    filtered: list[dict] = []
     for item in items:
-        game_type = GAME_TYPE_LABELS.get(item.get("game_type", ""), item.get("game_type", "-"))
-        role = _role_kind_label(item["role"])
-        lines.append(f"• #{item['id']} | {item['starts_at']} | {item['location']} | {game_type} | {role}")
+        starts_at = _parse_starts_at(str(item.get("starts_at", "")))
+        if starts_at is None:
+            continue
+        is_completed = starts_at <= now
+        if stage == "completed" and is_completed:
+            filtered.append(item)
+        if stage == "active" and not is_completed:
+            filtered.append(item)
+    return filtered
+
+
+def _my_registrations_text(stage: str, visible_items: list[dict]) -> str:
+    stage_label = "действующие" if stage == "active" else "завершенные"
+    lines = [
+        "Ваши регистрации.",
+        "Если хотите отменить регистрацию, нажмите на крестик рядом с нужной игрой.",
+        f"Сейчас показаны: {stage_label}.",
+    ]
+    if not visible_items:
+        lines.append("В этом разделе пока нет игр.")
     return "\n".join(lines)
 
 
@@ -52,7 +89,7 @@ async def pick_game_type(callback: CallbackQuery, db: Database) -> None:
         await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
         return
     _, game_type = callback.data.split(":")
-    if game_type not in GAME_TYPE_LABELS:
+    if not _is_valid_game_type(game_type):
         await callback.answer("Неизвестный формат игр.", show_alert=True)
         return
     user = db.get_user_by_tg(callback.from_user.id)
@@ -63,25 +100,29 @@ async def pick_game_type(callback: CallbackQuery, db: Database) -> None:
     can_staff = bool(user.get("can_staff"))
     if can_play and can_staff:
         await callback.message.answer(
-            f"{GAME_TYPE_LABELS[game_type]}: выберите роль для регистрации.",
+            f"{_game_type_title(game_type)}: выберите роль для регистрации.",
             reply_markup=registration_role_keyboard(can_play=True, can_staff=True, game_type=game_type),
         )
     elif can_play:
-        days = db.list_open_days(game_type=game_type)
+        days = db.list_open_days_for_user(game_type=game_type, user_id=int(user["id"]))
         if not days:
-            await callback.message.answer(f"Для формата «{GAME_TYPE_LABELS[game_type]}» пока нет открытых дней.")
+            await callback.message.answer(
+                f"Для формата «{_game_type_title(game_type)}» нет доступных дней для новой регистрации."
+            )
         else:
             await callback.message.answer(
-                f"{GAME_TYPE_LABELS[game_type]}: выберите день.",
+                f"{_game_type_title(game_type)}: выберите день.",
                 reply_markup=game_days_keyboard(game_type=game_type, role_kind="player", days=days),
             )
     elif can_staff:
-        days = db.list_open_days(game_type=game_type)
+        days = db.list_open_days_for_user(game_type=game_type, user_id=int(user["id"]))
         if not days:
-            await callback.message.answer(f"Для формата «{GAME_TYPE_LABELS[game_type]}» пока нет открытых дней.")
+            await callback.message.answer(
+                f"Для формата «{_game_type_title(game_type)}» нет доступных дней для новой регистрации."
+            )
         else:
             await callback.message.answer(
-                f"{GAME_TYPE_LABELS[game_type]}: выберите день.",
+                f"{_game_type_title(game_type)}: выберите день.",
                 reply_markup=game_days_keyboard(game_type=game_type, role_kind="staff", days=days),
             )
     else:
@@ -97,15 +138,19 @@ async def pick_registration_role(callback: CallbackQuery, db: Database) -> None:
         await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
         return
     _, game_type, role_kind = callback.data.split(":")
-    if game_type not in GAME_TYPE_LABELS or role_kind not in {"player", "staff"}:
+    if not _is_valid_game_type(game_type) or role_kind not in {"player", "staff"}:
         await callback.answer("Некорректный выбор.", show_alert=True)
         return
-    days = db.list_open_days(game_type=game_type)
+    user = db.get_user_by_tg(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
+        return
+    days = db.list_open_days_for_user(game_type=game_type, user_id=int(user["id"]))
     if not days:
-        await callback.answer("Открытых дней пока нет.", show_alert=True)
+        await callback.answer("Нет доступных дней для новой регистрации.", show_alert=True)
         return
     await callback.message.answer(
-        f"{GAME_TYPE_LABELS[game_type]} ({_role_kind_label(role_kind)}): выберите день.",
+        f"{_game_type_title(game_type)} ({_role_kind_label(role_kind)}): выберите день.",
         reply_markup=game_days_keyboard(game_type=game_type, role_kind=role_kind, days=days),
     )
     await callback.answer()
@@ -121,12 +166,20 @@ async def pick_registration_day(callback: CallbackQuery, db: Database) -> None:
     if not day:
         await callback.answer("Некорректный день.", show_alert=True)
         return
-    games = db.list_open_games_by_type_and_day(game_type=game_type, day=day)
+    user = db.get_user_by_tg(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
+        return
+    games = db.list_open_games_by_type_and_day_for_user(
+        game_type=game_type,
+        day=day,
+        user_id=int(user["id"]),
+    )
     if not games:
-        await callback.answer("На выбранный день нет открытых игр.", show_alert=True)
+        await callback.answer("На выбранный день нет доступных игр для новой регистрации.", show_alert=True)
         return
     await callback.message.answer(
-        f"{GAME_TYPE_LABELS[game_type]}, {day}. Выберите игру:",
+        f"{_game_type_title(game_type)}, {day}. Выберите игру:",
         reply_markup=game_slots_keyboard(game_type=game_type, role_kind=role_kind, games=games),
     )
     await callback.answer()
@@ -138,9 +191,12 @@ async def register_for_game(callback: CallbackQuery, db: Database) -> None:
         await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
         return
     _, game_type, role_kind, game_id_raw = callback.data.split(":")
+    if not _is_valid_game_type(game_type):
+        await callback.answer("Некорректный формат игр.", show_alert=True)
+        return
     game_id = int(game_id_raw)
     game = db.get_game_with_counts(game_id)
-    if not game or game.get("game_type") != game_type:
+    if not game or (game_type != ALL_GAMES_TOKEN and game.get("game_type") != game_type):
         await callback.answer("Игра не найдена.", show_alert=True)
         return
     if not db.is_game_open(game_id):
@@ -158,10 +214,24 @@ async def register_for_game(callback: CallbackQuery, db: Database) -> None:
         return
     _, text = db.register_user_for_kind(game_id=game_id, user_id=int(user["id"]), role_kind=role_kind)
     day = str(game["starts_at"]).split(" ")[0]
-    games = db.list_open_games_by_type_and_day(game_type=game_type, day=day)
+    games = db.list_open_games_by_type_and_day_for_user(
+        game_type=game_type,
+        day=day,
+        user_id=int(user["id"]),
+    )
+    if not games:
+        try:
+            await callback.message.edit_text(
+                f"{_game_type_title(game_type)}, {day}. Все доступные игры на этот день уже выбраны ✅",
+            )
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+        await callback.answer(text)
+        return
     try:
         await callback.message.edit_text(
-            f"{GAME_TYPE_LABELS[game_type]}, {day}. Выберите игру:",
+            f"{_game_type_title(game_type)}, {day}. Выберите игру:",
             reply_markup=game_slots_keyboard(game_type=game_type, role_kind=role_kind, games=games),
         )
     except TelegramBadRequest as exc:
@@ -179,14 +249,19 @@ async def my_registrations(message: Message, state: FSMContext, db: Database, co
         return
     data = await state.get_data()
     previous_message_id = data.get("my_registrations_message_id")
+    current_stage = data.get("my_registrations_stage", "active")
+    if current_stage not in {"active", "completed"}:
+        current_stage = "active"
     items = db.list_user_registrations(int(user["id"]))
     text = "У вас пока нет активных регистраций."
     markup = None
     if not items:
         await state.update_data(my_registrations_message_id=None)
     else:
-        text = _my_registrations_text(items)
-        markup = user_registrations_keyboard(items)
+        visible_items = _filter_registrations_by_stage(items, current_stage)
+        text = _my_registrations_text(current_stage, visible_items)
+        markup = user_registrations_keyboard(visible_items, current_stage)
+        await state.update_data(my_registrations_stage=current_stage)
 
     if previous_message_id:
         try:
@@ -204,6 +279,36 @@ async def my_registrations(message: Message, state: FSMContext, db: Database, co
     await state.update_data(my_registrations_message_id=sent.message_id)
 
 
+@router.callback_query(F.data.startswith("myreg_stage:"))
+async def switch_my_registrations_stage(
+    callback: CallbackQuery, state: FSMContext, db: Database
+) -> None:
+    if not db.user_exists(callback.from_user.id):
+        await callback.answer("Сначала пройдите регистрацию: /start", show_alert=True)
+        return
+    stage = callback.data.split(":")[1]
+    if stage not in {"active", "completed"}:
+        await callback.answer("Некорректный этап.", show_alert=True)
+        return
+    user = db.get_user_by_tg(callback.from_user.id)
+    if not user:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    items = db.list_user_registrations(int(user["id"]))
+    if not items:
+        await callback.message.edit_text("У вас пока нет активных регистраций.")
+        await state.update_data(my_registrations_message_id=None, my_registrations_stage="active")
+        await callback.answer()
+        return
+    visible_items = _filter_registrations_by_stage(items, stage)
+    await callback.message.edit_text(
+        _my_registrations_text(stage, visible_items),
+        reply_markup=user_registrations_keyboard(visible_items, stage),
+    )
+    await state.update_data(my_registrations_stage=stage)
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("myreg_cancel:"))
 async def cancel_my_registration(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
     if not db.user_exists(callback.from_user.id):
@@ -218,13 +323,18 @@ async def cancel_my_registration(callback: CallbackQuery, state: FSMContext, db:
     if removed:
         await callback.answer("Регистрация отменена.")
         items = db.list_user_registrations(int(user["id"]))
+        data = await state.get_data()
+        current_stage = data.get("my_registrations_stage", "active")
+        if current_stage not in {"active", "completed"}:
+            current_stage = "active"
         if not items:
             await callback.message.edit_text("У вас пока нет активных регистраций.")
-            await state.update_data(my_registrations_message_id=None)
+            await state.update_data(my_registrations_message_id=None, my_registrations_stage="active")
             return
+        visible_items = _filter_registrations_by_stage(items, current_stage)
         await callback.message.edit_text(
-            _my_registrations_text(items),
-            reply_markup=user_registrations_keyboard(items),
+            _my_registrations_text(current_stage, visible_items),
+            reply_markup=user_registrations_keyboard(visible_items, current_stage),
         )
     else:
         await callback.answer("Вы не зарегистрированы на эту игру.", show_alert=True)

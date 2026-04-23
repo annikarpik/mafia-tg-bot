@@ -60,6 +60,18 @@ def game_type_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def game_type_with_all_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🏆 Турнир"), KeyboardButton(text="🎉 Фанки")],
+            [KeyboardButton(text="📚 Обучающие"), KeyboardButton(text="📋 Все игры")],
+            [KeyboardButton(text="↩️ Назад")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
 def admin_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -71,11 +83,20 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def back_only_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="↩️ Назад")]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
 def game_edit_field_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🕒 Время игры"), KeyboardButton(text="📍 Место")],
-            [KeyboardButton(text="⏳ Окончание регистрации"), KeyboardButton(text="🗑️ Удалить игру")],
+            [KeyboardButton(text="🕒 Время"), KeyboardButton(text="📅 Дата")],
+            [KeyboardButton(text="📍 Место"), KeyboardButton(text="🎮 Формат игры")],
+            [KeyboardButton(text="🗑️ Удалить игровой день")],
             [KeyboardButton(text="↩️ Назад")],
         ],
         resize_keyboard=True,
@@ -88,8 +109,7 @@ def profile_edit_field_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="🤵 Обращение"), KeyboardButton(text="🪪 ФИО")],
             [KeyboardButton(text="🎓 Статус по пропуску"), KeyboardButton(text="🎭 Роль")],
-            [KeyboardButton(text="🏷️ Никнейм")],
-            [KeyboardButton(text="↩️ Назад")],
+            [KeyboardButton(text="🏷️ Никнейм"), KeyboardButton(text="↩️ Назад")],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,

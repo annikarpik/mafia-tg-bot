@@ -278,8 +278,15 @@ class Database:
         cur = self.conn.execute("DELETE FROM pending_admins WHERE username = %s", (clean,))
         return cur.rowcount > 0
 
+    def remove_pending_admin_username(self, username: str) -> bool:
+        clean = username.strip().lstrip("@").lower()
+        if not clean:
+            return False
+        cur = self.conn.execute("DELETE FROM pending_admins WHERE username = %s", (clean,))
+        return cur.rowcount > 0
+
     # ------------------------------------------------------------------ games
-    def create_game(self, starts_at: str, location: str, registration_until: str, game_type: str) -> int:
+    def create_game(self, starts_at: str, location: str, game_type: str) -> int:
         now = datetime.utcnow().isoformat()
         row = self.conn.execute(
             """
@@ -287,7 +294,7 @@ class Database:
             VALUES (%s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (starts_at, location, game_type, registration_until, now),
+            (starts_at, location, game_type, starts_at, now),
         ).fetchone()
         return int(row["id"])
 
@@ -345,8 +352,8 @@ class Database:
         now = datetime.now()
         games: list[dict[str, Any]] = []
         for game in self.list_games():
-            until = self._parse_datetime(game["registration_until"])
-            if until is None or until >= now:
+            starts_at = self._parse_datetime(game["starts_at"])
+            if starts_at is None or starts_at >= now:
                 games.append(game)
         return games
 
@@ -361,11 +368,36 @@ class Database:
             days.add(dt.strftime("%d.%m.%Y"))
         return sorted(days, key=lambda raw: datetime.strptime(raw, "%d.%m.%Y"))
 
+    def list_user_registration_game_ids(self, user_id: int) -> set[int]:
+        rows = self.conn.execute(
+            """
+            SELECT game_id
+            FROM registrations
+            WHERE user_id = %s
+            """,
+            (user_id,),
+        ).fetchall()
+        return {int(row["game_id"]) for row in rows}
+
+    def list_open_days_for_user(self, game_type: str, user_id: int) -> list[str]:
+        registered_game_ids = self.list_user_registration_game_ids(user_id)
+        days: set[str] = set()
+        for game in self.list_open_games():
+            if game_type != "all" and game.get("game_type") != game_type:
+                continue
+            if int(game["id"]) in registered_game_ids:
+                continue
+            dt = self._parse_datetime(game["starts_at"])
+            if not dt:
+                continue
+            days.add(dt.strftime("%d.%m.%Y"))
+        return sorted(days, key=lambda raw: datetime.strptime(raw, "%d.%m.%Y"))
+
     def list_open_games_by_type_and_day(self, game_type: str, day: str) -> list[dict[str, Any]]:
         day_dt = datetime.strptime(day, "%d.%m.%Y")
         games: list[dict[str, Any]] = []
         for game in self.list_open_games():
-            if game.get("game_type") != game_type:
+            if game_type != "all" and game.get("game_type") != game_type:
                 continue
             starts_at = self._parse_datetime(game["starts_at"])
             if not starts_at:
@@ -377,6 +409,16 @@ class Database:
             games.append(game_copy)
         games.sort(key=lambda row: row["starts_at"])
         return games
+
+    def list_open_games_by_type_and_day_for_user(
+        self, game_type: str, day: str, user_id: int
+    ) -> list[dict[str, Any]]:
+        registered_game_ids = self.list_user_registration_game_ids(user_id)
+        return [
+            game
+            for game in self.list_open_games_by_type_and_day(game_type=game_type, day=day)
+            if int(game["id"]) not in registered_game_ids
+        ]
 
     def list_game_days(self) -> list[str]:
         days: set[str] = set()
@@ -420,10 +462,10 @@ class Database:
         game = self.get_game_with_counts(game_id)
         if not game:
             return False
-        until = self._parse_datetime(game["registration_until"])
-        if until is None:
+        starts_at = self._parse_datetime(game["starts_at"])
+        if starts_at is None:
             return True
-        return until >= datetime.now()
+        return starts_at >= datetime.now()
 
     def get_game_with_counts(self, game_id: int) -> dict[str, Any] | None:
         for game in self.list_games():
@@ -436,21 +478,26 @@ class Database:
         game_id: int,
         starts_at: str | None = None,
         location: str | None = None,
-        registration_until: str | None = None,
     ) -> bool:
         game = self.get_game(game_id)
         if not game:
             return False
         new_starts_at = starts_at or game["starts_at"]
         new_location = location or game["location"]
-        new_registration_until = registration_until or game["registration_until"]
         cur = self.conn.execute(
             """
             UPDATE games
             SET starts_at = %s, location = %s, registration_until = %s
             WHERE id = %s
             """,
-            (new_starts_at, new_location, new_registration_until, game_id),
+            (new_starts_at, new_location, new_starts_at, game_id),
+        )
+        return cur.rowcount > 0
+
+    def update_game_type(self, game_id: int, game_type: str) -> bool:
+        cur = self.conn.execute(
+            "UPDATE games SET game_type = %s WHERE id = %s",
+            (game_type, game_id),
         )
         return cur.rowcount > 0
 
