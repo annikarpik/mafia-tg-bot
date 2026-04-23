@@ -646,7 +646,10 @@ async def games_list_pick_day(callback: CallbackQuery, db: Database) -> None:
     lines = [f"Игры на {day}:"]
     for game in games:
         game_type = GAME_TYPE_LABELS.get(game.get("game_type", ""), game.get("game_type", "-"))
-        lines.append(f"• #{game['id']} | {game['time']} | {game['location']} | {game_type}")
+        total_registered = int(game.get("players", 0)) + int(game.get("staff", 0))
+        lines.append(
+            f"• #{game['id']} | {game['time']} | {game['location']} | {game_type} ({total_registered}/13)"
+        )
     lines.append("")
     lines.append("Выберите игру кнопкой:")
     await callback.message.edit_text(

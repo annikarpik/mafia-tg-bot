@@ -43,7 +43,7 @@ def game_slots_keyboard(game_type: str, role_kind: str, games: list[dict]) -> In
     kb = InlineKeyboardBuilder()
     for game in games:
         current = int(game.get("players", 0)) if role_kind == "player" else int(game.get("staff", 0))
-        limit = 10 if role_kind == "player" else 4
+        limit = 10 if role_kind == "player" else 3
         type_label = GAME_TYPE_LABELS.get(game.get("game_type", game_type), str(game.get("game_type", game_type)))
         kb.button(
             text=f"{type_label} | Игра #{game['id']} {game['time']} ({current}/{limit})",
@@ -106,8 +106,9 @@ def admin_games_by_day_keyboard(games: list[dict]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for game in games:
         game_type = GAME_TYPE_LABELS.get(game.get("game_type", ""), str(game.get("game_type", "")))
+        total_registered = int(game.get("players", 0)) + int(game.get("staff", 0))
         kb.button(
-            text=f"#{game['id']} {game['time']} {game_type}",
+            text=f"#{game['id']} {game['time']} {game_type} ({total_registered}/13)",
             callback_data=f"adm_game:{game['id']}",
         )
     kb.adjust(1)

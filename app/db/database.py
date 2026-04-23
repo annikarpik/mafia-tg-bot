@@ -18,7 +18,7 @@ GAME_TYPE_LABELS: dict[str, str] = {
 
 ROLE_LIMITS: dict[str, int] = {
     "host": 1,
-    "judge": 3,
+    "judge": 2,
     "player": 10,
 }
 
