@@ -155,8 +155,16 @@ class Database:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_games_starts_at_text ON games(starts_at)")
         self.conn.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_games_starts_at_ts
-            ON games ((to_timestamp(starts_at, 'DD.MM.YYYY HH24:MI')))
+            CREATE INDEX IF NOT EXISTS idx_games_starts_at_sort_key
+            ON games (
+                (
+                    substring(starts_at, 7, 4)
+                    || substring(starts_at, 4, 2)
+                    || substring(starts_at, 1, 2)
+                    || substring(starts_at, 12, 2)
+                    || substring(starts_at, 15, 2)
+                )
+            )
             """
         )
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_registrations_user_id ON registrations(user_id)")
